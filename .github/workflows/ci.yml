@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 语法检查
+        run: |
+          for f in server.js lib/*.js; do
+            node --check "$f"
+          done
+
+      - name: 冒烟测试
+        run: |
+          mkdir -p /tmp/smoke/data /tmp/smoke/servers
+          cp -r server.js lib web /tmp/smoke/
+          cd /tmp/smoke
+          node server.js --port 8399 --host 127.0.0.1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8399/api/status > /dev/null && break
+            sleep 1
+          done
+
+          # 公开状态接口
+          curl -sf http://127.0.0.1:8399/api/status > /dev/null
+
+          # 静态文件
+          curl -sf http://127.0.0.1:8399/index.html > /dev/null
+
+          # 路径穿越必须被拒绝
+          code=$(curl -s -o /dev/null -w '%{http_code}' --path-as-is \
+            "http://127.0.0.1:8399/..%2fdata%2fconfig.json")
+          test "$code" = "403" || { echo "穿越测试失败: $code"; exit 1; }
+
+          # 畸形编码必须返回 4xx,不能打挂请求
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "http://127.0.0.1:8399/api/status/%zz")
+          test "$code" = "400" || { echo "畸形编码测试失败: $code"; exit 1; }
+
+          # 未登录访问管理接口必须 401
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            http://127.0.0.1:8399/api/admin/overview)
+          test "$code" = "401" || { echo "鉴权测试失败: $code"; exit 1; }
+
+          # 默认账号可登录
+          curl -sf -X POST -H 'Content-Type: application/json' \
+            -d '{"username":"admin","password":"admin123"}' \
+            http://127.0.0.1:8399/api/login > /dev/null
+
+          echo "冒烟测试通过"

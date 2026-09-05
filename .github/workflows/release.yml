@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+env:
+  ARTIFACT: MCSLite-${{ github.ref_name }}.zip
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 创建 Release 并上传资产
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 打包
+        run: |
+          mkdir -p .dist
+          zip -r ".dist/${ARTIFACT}" server.js start.bat README.md LICENSE bg.jpg lib web
+
+      - name: 计算哈希(SLSA 主体)
+        id: hash
+        run: |
+          cd .dist
+          sha256sum "${ARTIFACT}" > ../hashes.txt
+          echo "hashes=$(base64 -w0 ../hashes.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: 创建 Release 并上传
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "MCSLite ${{ github.ref_name }}" \
+            --generate-notes || true
+          gh release upload "${{ github.ref_name }}" ".dist/${ARTIFACT}" --clobber
+
+  # SLSA3 来源证明:由 OpenSSF 通用生成器以独立工作流签名生成,
+  # 完成后自动将 <artifact>.intoto.jsonl 上传到同一 Release
+  provenance:
+    needs: [build]
+    permissions:
+      actions: read
+      id-token: write   # 签名来源所需
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: "${{ needs.build.outputs.hashes }}"
+      upload-assets: true
+    secrets: inherit

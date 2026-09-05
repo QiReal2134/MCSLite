@@ -146,15 +146,34 @@ function publicStatus() {
 // ---------- 路由 ----------
 const router = createRouter();
 
+// 图片响应:ETag 协商缓存。浏览器二次访问带 If-None-Match 命中即 304,
+// 避免整图反复传输;文件变化时 ETag 随 mtime+size 变化,即时生效
+function etagOf(st) {
+  return '"' + st.size.toString(36) + '-' + Math.floor(st.mtimeMs).toString(36) + '"';
+}
+function sendImage(req, res, file, st) {
+  const etag = etagOf(st);
+  const imm = path.extname(file).toLowerCase() === '.svg' ? '' : '; max-age=60';
+  const inm = String(req.headers['if-none-match'] || '');
+  if (inm && inm.split(',').map(s => s.trim()).includes(etag)) {
+    res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache' + imm });
+    res.end();
+    return;
+  }
+  res.writeHead(200, {
+    'Content-Type': MIME[path.extname(file).toLowerCase()] || 'image/jpeg',
+    'Content-Length': st.size,
+    'ETag': etag,
+    'Cache-Control': 'no-cache' + imm
+  });
+  fs.createReadStream(file).pipe(res);
+}
+
 // 后台图片(需在静态通配之前匹配)
 router.get('bg', (req, res) => {
   const file = safeResolve(ROOT, config.panel.background);
   if (!file || !fs.existsSync(file)) { fail(res, 404, '背景图片不存在'); return; }
-  res.writeHead(200, {
-    'Content-Type': MIME[path.extname(file).toLowerCase()] || 'image/jpeg',
-    'Cache-Control': 'no-cache'
-  });
-  fs.createReadStream(file).pipe(res);
+  sendImage(req, res, file, fs.statSync(file));
 });
 
 // 首页展示图片(B,管理员可单独设置)
@@ -163,11 +182,7 @@ router.get('hero', (req, res) => {
   if (!rel) { fail(res, 404, '未设置首页图片'); return; }
   const file = safeResolve(ROOT, rel);
   if (!file || !fs.existsSync(file)) { fail(res, 404, '首页图片不存在'); return; }
-  res.writeHead(200, {
-    'Content-Type': MIME[path.extname(file).toLowerCase()] || 'image/jpeg',
-    'Cache-Control': 'no-cache'
-  });
-  fs.createReadStream(file).pipe(res);
+  sendImage(req, res, file, fs.statSync(file));
 });
 
 // 玩家视图(公开,只读)
@@ -303,8 +318,9 @@ function admin(fn) {
   return (req, res) => {
     if (!auth.requireAuth(req, res)) return;
     if (fn._admin && !auth.requireAdmin(req, res)) return;
-    try { return fn(req, res); }
-    catch (e) { fail(res, 500, (e && e.message) || '服务器错误'); }
+    Promise.resolve()
+      .then(() => fn(req, res))
+      .catch(e => { try { fail(res, 500, (e && e.message) || '服务器错误'); } catch {} });
   };
 }
 admin.admin = (fn) => { fn._admin = true; return admin(fn); };
@@ -534,17 +550,17 @@ function fileRoot(req) {
   return im.instanceDir(ins);
 }
 
-router.get('api/admin/instances/:id/files', admin((req, res) => {
+router.get('api/admin/instances/:id/files', admin(async (req, res) => {
   const root = fileRoot(req);
   if (!root) return fail(res, 404, '实例不存在');
-  try { ok(res, F.listDir(root, req.query.path || '')); }
+  try { ok(res, await F.listDir(root, req.query.path || '')); }
   catch (e) { fail(res, 400, e.message); }
 }));
 
-router.get('api/admin/instances/:id/file', admin((req, res) => {
+router.get('api/admin/instances/:id/file', admin(async (req, res) => {
   const root = fileRoot(req);
   if (!root) return fail(res, 404, '实例不存在');
-  try { ok(res, { content: F.readFile(root, req.query.path || '', 8 * 1024 * 1024) }); }
+  try { ok(res, { content: await F.readFile(root, req.query.path || '', 8 * 1024 * 1024) }); }
   catch (e) { fail(res, 400, e.message); }
 }));
 
@@ -552,7 +568,7 @@ router.put('api/admin/instances/:id/file', admin(async (req, res) => {
   const root = fileRoot(req);
   if (!root) return fail(res, 404, '实例不存在');
   const body = JSON.parse((await readBody(req, 8 * 1024 * 1024)).toString('utf8'));
-  try { F.writeFile(root, req.query.path || '', body.content ?? ''); ok(res, {}); }
+  try { await F.writeFile(root, req.query.path || '', body.content ?? ''); ok(res, {}); }
   catch (e) { fail(res, 400, e.message); }
 }));
 
@@ -589,7 +605,7 @@ router.post('api/admin/instances/:id/mkdir', admin(async (req, res) => {
   const root = fileRoot(req);
   if (!root) return fail(res, 404, '实例不存在');
   const body = JSON.parse((await readBody(req, 16 * 1024)).toString('utf8'));
-  try { F.mkdir(root, body.path || ''); ok(res, {}); }
+  try { await F.mkdir(root, body.path || ''); ok(res, {}); }
   catch (e) { fail(res, 400, e.message); }
 }));
 
@@ -597,7 +613,7 @@ router.post('api/admin/instances/:id/rename', admin(async (req, res) => {
   const root = fileRoot(req);
   if (!root) return fail(res, 404, '实例不存在');
   const body = JSON.parse((await readBody(req, 16 * 1024)).toString('utf8'));
-  try { F.rename(root, body.path || '', body.newName); ok(res, {}); }
+  try { await F.rename(root, body.path || '', body.newName); ok(res, {}); }
   catch (e) { fail(res, 400, e.message); }
 }));
 
@@ -605,7 +621,7 @@ router.post('api/admin/instances/:id/delete', admin(async (req, res) => {
   const root = fileRoot(req);
   if (!root) return fail(res, 404, '实例不存在');
   const body = JSON.parse((await readBody(req, 16 * 1024)).toString('utf8'));
-  try { F.remove(root, body.path || ''); ok(res, {}); }
+  try { await F.remove(root, body.path || ''); ok(res, {}); }
   catch (e) { fail(res, 400, e.message); }
 }));
 

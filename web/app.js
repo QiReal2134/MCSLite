@@ -126,6 +126,9 @@ const state = {
   currentId: null,
   tab: 'overview',
   filePath: '/',
+  fileEntries: [],
+  fileFilter: '',
+  fileSort: { key: 'name', dir: 1 },
   sse: null,
   playerTimer: null,
   overviewTimer: null,
@@ -187,6 +190,11 @@ function closeAllGlassMenus() {
   $$('.gs-menu').forEach(m => { m.style.display = 'none'; });
   $$('.glass-select').forEach(w => w.classList.remove('open'));
 }
+// 全局只挂一次:点击下拉外部统一关闭(避免每个下拉各挂一个监听器导致泄漏)
+document.addEventListener('click', (e) => {
+  if (e.target.closest && e.target.closest('.glass-select')) return;
+  closeAllGlassMenus();
+});
 
 // 把区域内所有 <select> 升级为玻璃下拉(原生弹出层无法加模糊;原 select 保留隐藏,值同步)
 function upgradeSelects(root) {
@@ -242,7 +250,6 @@ function upgradeSelects(root) {
         if (cur) cur.scrollIntoView({ block: 'nearest' });
       }
     };
-    document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) closeAllGlassMenus(); });
     updateLabel();
     wrap.appendChild(value);
     wrap.appendChild(menu);
@@ -295,7 +302,7 @@ function renderHero(d) {
       <div class="hero-sub">${esc(slogan)}</div>
     </div>
     <div class="hero-img-panel">
-      <img src="${imgSrc}" alt="服务器图片" onerror="this.style.display='none'">
+      <img src="${imgSrc}" alt="服务器图片" loading="lazy" decoding="async" onerror="this.style.display='none'">
     </div>`;
 }
 
@@ -940,13 +947,38 @@ $('#consoleBox').addEventListener('scroll', () => {
 /* ---------- 文件管理 Tab ---------- */
 async function renderFiles() {
   const el = $('#tabFiles');
-  el.innerHTML = '<div class="muted">加载中...</div>';
+  // 骨架屏:避免白屏等待
+  el.innerHTML = `<div class="files-skeleton glass">
+    <div class="sk-bar"></div>
+    <div class="sk-row w60"></div>
+    <div class="sk-row"></div>
+    <div class="sk-row w80"></div>
+    <div class="sk-row"></div>
+    <div class="sk-row w70"></div>
+  </div>`;
   try {
     const data = await get(`/api/admin/instances/${state.currentId}/files?path=${encodeURIComponent(state.filePath)}`);
+    state.fileEntries = data.entries || [];
     renderFileList(data);
   } catch (e) {
     el.innerHTML = `<div class="muted">${esc(e.message)}</div>`;
   }
+}
+
+// 当前端内排序与过滤(纯客户端,不重复请求)
+function fileView(entries) {
+  const kw = (state.fileFilter || '').toLowerCase();
+  let list = kw ? entries.filter(f => f.name.toLowerCase().includes(kw)) : entries.slice();
+  const s = state.fileSort || { key: 'name', dir: 1 };
+  list.sort((a, b) => {
+    if (a.dir !== b.dir) return a.dir ? -1 : 1; // 目录始终在前
+    let r = 0;
+    if (s.key === 'size') r = a.size - b.size;
+    else if (s.key === 'mtime') r = a.mtime - b.mtime;
+    else r = a.name.localeCompare(b.name, 'zh-CN', { numeric: true });
+    return r * s.dir;
+  });
+  return list;
 }
 
 function renderFileList(data) {
@@ -958,8 +990,10 @@ function renderFileList(data) {
     acc += '/' + s;
     crumbs.push('<span>/</span><a data-p="' + esc(acc) + '">' + esc(s) + '</a>');
   });
-  const rows = data.entries.map(f => {
-    const icon = '';
+  const s = state.fileSort || { key: 'name', dir: 1 };
+  const arrow = (key) => s.key === key ? (s.dir > 0 ? ' ▲' : ' ▼') : '';
+  const list = fileView(state.fileEntries || []);
+  const rows = list.map(f => {
     const size = f.dir ? '—' : fmtBytes(f.size);
     const time = f.mtime ? new Date(f.mtime).toLocaleString('zh-CN', { hour12: false }) : '—';
     return `<tr>
@@ -969,8 +1003,9 @@ function renderFileList(data) {
       <td class="muted" style="font-size:12px">${time}</td>
       <td><div class="factions">
         ${!f.dir ? `<button class="faction" data-act="download" data-name="${esc(f.name)}">下载</button>
-        <button class="faction" data-act="edit" data-name="${esc(f.name)}">编辑</button>
-        <button class="faction" data-act="extract" data-name="${esc(f.name)}">解压</button>` : ''}
+        <button class="faction" data-act="edit" data-name="${esc(f.name)}">编辑</button>` : ''}
+        ${f.img ? `<button class="faction" data-act="preview" data-name="${esc(f.name)}">预览</button>` : ''}
+        ${!f.dir && (f.name.toLowerCase().endsWith('.zip') || f.name.toLowerCase().endsWith('.gz') || f.name.toLowerCase().endsWith('.tgz')) ? `<button class="faction" data-act="extract" data-name="${esc(f.name)}">解压</button>` : ''}
         <button class="faction" data-act="rename" data-name="${esc(f.name)}">重命名</button>
         <button class="faction del" data-act="delete" data-name="${esc(f.name)}">删除</button>
       </div></td>
@@ -981,34 +1016,63 @@ function renderFileList(data) {
     <div class="file-toolbar">
       <div class="crumb">${crumbs.join('')}</div>
       <div style="flex:1"></div>
+      <input id="fileFilter" class="field field-sm" type="text" placeholder="过滤当前目录..." value="${esc(state.fileFilter || '')}" autocomplete="off">
       <button class="btn btn-sm" id="btnUpload">↑ 上传文件</button>
       <button class="btn btn-sm" id="btnNewFolder">新建文件夹</button>
       <button class="btn btn-sm" id="btnNewFile">新建文件</button>
       <button class="btn btn-sm btn-ghost" id="btnRefreshFiles">刷新</button>
     </div>
+    <div id="uploadBar" class="upload-bar hidden">
+      <div class="upload-info muted" id="uploadInfo"></div>
+      <div class="bar"><i id="uploadPct" style="width:0%"></i></div>
+    </div>
     <div class="file-table-wrap glass" style="overflow:auto">
       <table class="file-table">
-        <thead><tr><th>名称</th><th>类型</th><th>大小</th><th>修改时间</th><th style="text-align:right">操作</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="5" class="muted">空目录</td></tr>'}</tbody>
+        <thead><tr>
+          <th class="sortable" data-key="name">名称${arrow('name')}</th>
+          <th>类型</th>
+          <th class="sortable" data-key="size">大小${arrow('size')}</th>
+          <th class="sortable" data-key="mtime">修改时间${arrow('mtime')}</th>
+          <th style="text-align:right">操作</th>
+        </tr></thead>
+        <tbody id="fileRows">${rows || '<tr><td colspan="5" class="muted">' + (state.fileFilter ? '无匹配项' : '空目录') + '</td></tr>'}</tbody>
       </table>
-    </div>`;
+    </div>
+    <div class="muted" style="font-size:12px;margin-top:6px">共 ${list.length} 项${state.fileFilter ? `(过滤自 ${state.fileEntries.length} 项)` : ''}</div>`;
 
   // 面包屑
   $$('.crumb a', el).forEach(a => {
-    a.onclick = () => { state.filePath = a.dataset.p; renderFiles(); };
+    a.onclick = () => { state.filePath = a.dataset.p; state.fileFilter = ''; renderFiles(); };
   });
-  // 双击/点击文件名
-  $$('.fname', el).forEach(f => {
-    f.onclick = () => {
-      const name = f.dataset.name;
-      if (f.dataset.kind === 'dir') {
-        state.filePath = (state.filePath === '/' ? '' : state.filePath) + '/' + name;
-        renderFiles();
-      } else {
-        openFileEditor(name);
-      }
+  // 过滤(仅重绘表格主体,不重新请求)
+  $('#fileFilter', el).oninput = (e) => {
+    state.fileFilter = e.target.value.trim();
+    const kw = state.fileFilter.toLowerCase();
+    const view = fileView(state.fileEntries || []);
+    const tb = $('#fileRows', el);
+    tb.innerHTML = view.map(f => {
+      const size = f.dir ? '—' : fmtBytes(f.size);
+      const time = f.mtime ? new Date(f.mtime).toLocaleString('zh-CN', { hour12: false }) : '—';
+      return `<tr>
+        <td><span class="fname" data-kind="${f.dir ? 'dir' : 'file'}" data-name="${esc(f.name)}">${esc(f.name)}</span></td>
+        <td>${f.dir ? '目录' : '文件'}</td>
+        <td class="mono">${size}</td>
+        <td class="muted" style="font-size:12px">${time}</td>
+        <td></td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="5" class="muted">无匹配项</td></tr>';
+    bindFileNames(tb);
+  };
+  // 排序
+  $$('th.sortable', el).forEach(th => {
+    th.onclick = () => {
+      const key = th.dataset.key;
+      if (s.key === key) s.dir = -s.dir; else { state.fileSort = { key, dir: 1 }; }
+      renderFileList(data);
     };
   });
+  // 双击/点击文件名
+  bindFileNames(el);
   // 操作按钮
   $$('.faction', el).forEach(b => {
     b.onclick = async () => {
@@ -1017,6 +1081,7 @@ function renderFileList(data) {
       const p = joinPath(state.filePath, name);
       if (act === 'download') window.location = `/api/admin/instances/${state.currentId}/download?path=${encodeURIComponent(p)}`;
       else if (act === 'edit') openFileEditor(name);
+      else if (act === 'preview') previewImage(name);
       else if (act === 'extract') {
         if (await confirmDialog('解压文件', `将解压 ${name} 到当前目录,确认?`)) {
           try { await post(`/api/admin/instances/${state.currentId}/extract`, { path: p }); toast('解压完成', 'ok'); renderFiles(); }
@@ -1036,7 +1101,8 @@ function renderFileList(data) {
   $('#btnUpload', el).onclick = () => {
     const input = document.createElement('input');
     input.type = 'file';
-    input.onchange = () => { if (input.files[0]) uploadFile(input.files[0]); };
+    input.multiple = true;
+    input.onchange = () => { if (input.files.length) uploadFiles(Array.from(input.files)); };
     input.click();
   };
   $('#btnNewFolder', el).onclick = () => promptText('新建文件夹', '', '请输入文件夹名称', async (name) => {
@@ -1052,39 +1118,152 @@ function renderFileList(data) {
   $('#btnRefreshFiles', el).onclick = renderFiles;
 }
 
+// 绑定文件名点击(进入目录/打开编辑器);过滤重绘时复用
+function bindFileNames(scope) {
+  $$('.fname', scope).forEach(f => {
+    f.onclick = () => {
+      const name = f.dataset.name;
+      if (f.dataset.kind === 'dir') {
+        state.filePath = (state.filePath === '/' ? '' : state.filePath) + '/' + name;
+        state.fileFilter = '';
+        renderFiles();
+      } else {
+        openFileEditor(name);
+      }
+    };
+  });
+}
+
 function joinPath(dir, name) {
   return (dir === '/' ? '' : dir) + '/' + name;
 }
 
-async function uploadFile(file) {
-  try {
-    await post(`/api/admin/instances/${state.currentId}/upload?path=${encodeURIComponent(state.filePath)}&filename=${encodeURIComponent(file.name)}`, undefined, file);
-    toast('上传成功: ' + file.name, 'ok');
-    renderFiles();
-  } catch (e) { toast(e.message, 'err'); }
+// 带进度的上传(XHR 支持上传进度;fetch 没有)
+function uploadXHR(url, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total); };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) { try { resolve(JSON.parse(xhr.responseText)); } catch { resolve(null); } }
+      else {
+        let m = '上传失败';
+        try { m = JSON.parse(xhr.responseText).error || m; } catch {}
+        reject(new Error(m));
+      }
+    };
+    xhr.onerror = () => reject(new Error('网络错误'));
+    xhr.send(file);
+  });
+}
+
+// 多文件顺序上传,共享进度条
+async function uploadFiles(files) {
+  const el = $('#tabFiles');
+  const bar = $('#uploadBar', el);
+  const info = $('#uploadInfo', el);
+  const pct = $('#uploadPct', el);
+  if (!bar) return renderFiles();
+  bar.classList.remove('hidden');
+  let done = 0;
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    info.textContent = `上传 ${i + 1}/${files.length}:${f.name}(${fmtBytes(f.size)})`;
+    pct.style.width = '0%';
+    try {
+      await uploadXHR(
+        `/api/admin/instances/${state.currentId}/upload?path=${encodeURIComponent(state.filePath)}&filename=${encodeURIComponent(f.name)}`,
+        f,
+        (loaded, total) => { pct.style.width = Math.round(loaded / total * 100) + '%'; }
+      );
+      done++;
+    } catch (e) {
+      toast(`${f.name} 上传失败: ${e.message}`, 'err');
+    }
+  }
+  bar.classList.add('hidden');
+  if (done > 0) toast(`已上传 ${done}/${files.length} 个文件`, 'ok');
+  renderFiles();
+}
+
+function uploadFile(file) { return uploadFiles([file]); }
+
+// 图片预览(同源 <img>,自动携带会话)
+function previewImage(name) {
+  const url = `/api/admin/instances/${state.currentId}/download?path=${encodeURIComponent(joinPath(state.filePath, name))}`;
+  const { modal } = openModal(`
+    <h3>${esc(name)}</h3>
+    <div class="img-preview"><img src="${url}" alt="${esc(name)}" loading="lazy" decoding="async" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'muted',textContent:'图片无法加载'}))"></div>
+    <div class="modal-actions"><button class="btn" id="pvClose">关闭</button></div>`);
+  $('#pvClose', modal).onclick = closeModal;
 }
 
 function openFileEditor(name) {
   const p = joinPath(state.filePath, name);
+  let dirty = false;
   const { modal } = openModal(`
-    <h3>编辑 ${esc(name)}</h3>
-    <textarea id="fileEditor" class="field" style="width:100%;min-height:300px;background:rgba(0,0,0,.4);color:var(--text);border:1px solid var(--glass-border);border-radius:10px;padding:12px;font-family:var(--mono);font-size:12.5px"></textarea>
+    <h3>编辑 ${esc(name)} <span id="feMeta" class="muted" style="font-size:12px;font-weight:400"></span></h3>
+    <textarea id="fileEditor" class="field file-editor" spellcheck="false"></textarea>
     <div class="modal-actions">
-      <button class="btn" id="feCancel">取消</button>
-      <button class="btn btn-primary" id="feSave">保存</button>
+      <span id="feState" class="muted" style="flex:1;text-align:left;font-size:12px"></span>
+      <button class="btn" id="feCancel">关闭</button>
+      <button class="btn btn-primary" id="feSave">保存 (Ctrl+S)</button>
     </div>`);
-  $('#feCancel', modal).onclick = closeModal;
   const ta = $('#fileEditor', modal);
-  get(`/api/admin/instances/${state.currentId}/file?path=${encodeURIComponent(p)}`)
-    .then(d => { ta.value = d.content; ta.focus(); })
-    .catch(e => { toast(e.message, 'err'); closeModal(); });
-  $('#feSave', modal).onclick = async () => {
+  const meta = $('#feMeta', modal);
+  const stateEl = $('#feState', modal);
+  const saveBtn = $('#feSave', modal);
+
+  const updateMeta = () => {
+    const lines = ta.value ? ta.value.split('\n').length : 0;
+    const size = new Blob([ta.value]).size;
+    meta.textContent = `· ${lines} 行 · ${fmtBytes(size)}`;
+  };
+  const markDirty = () => {
+    if (!dirty) { dirty = true; stateEl.textContent = '● 未保存'; }
+    updateMeta();
+  };
+
+  const save = async () => {
+    saveBtn.disabled = true;
+    saveBtn.textContent = '保存中...';
     try {
       await put(`/api/admin/instances/${state.currentId}/file?path=${encodeURIComponent(p)}`, { content: ta.value });
+      dirty = false;
+      stateEl.textContent = '已保存 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
       toast('已保存', 'ok');
-      closeModal();
     } catch (e) { toast(e.message, 'err'); }
+    saveBtn.disabled = false;
+    saveBtn.textContent = '保存 (Ctrl+S)';
   };
+
+  saveBtn.onclick = save;
+  $('#feCancel', modal).onclick = async () => {
+    // 有未保存改动时确认,防误关丢失
+    if (dirty && !(await confirmDialog('放弃修改', '有未保存的修改,确定放弃并关闭?', true))) return;
+    closeModal();
+  };
+  ta.addEventListener('input', markDirty);
+  ta.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); return; }
+    if (e.key === 'Tab') {
+      // Tab 插入两个空格,保持缩进习惯
+      e.preventDefault();
+      ta.setRangeText('  ', ta.selectionStart, ta.selectionEnd, 'end');
+      markDirty();
+    }
+  });
+
+  stateEl.textContent = '加载中...';
+  get(`/api/admin/instances/${state.currentId}/file?path=${encodeURIComponent(p)}`)
+    .then(d => {
+      ta.value = d.content ?? '';
+      dirty = false;
+      stateEl.textContent = '';
+      updateMeta();
+      ta.focus();
+    })
+    .catch(e => { toast(e.message, 'err'); closeModal(); });
 }
 
 function openRename(name) {
@@ -1675,7 +1854,7 @@ function renderAppearancePage(el) {
       <div class="ov-title" style="margin:6px 0 8px;font-size:13.5px">B · 首页图片(留空=跟随背景)</div>
       <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
         <div style="width:220px;border-radius:12px;overflow:hidden;border:1px solid var(--glass-border);flex-shrink:0">
-          <img id="hpPreview" src="${hero.heroImage ? '/hero?v=' + Date.now() : bgUrl()}" style="width:100%;aspect-ratio:16/10;object-fit:cover;display:block" onerror="this.style.display='none'">
+          <img id="hpPreview" src="${hero.heroImage ? '/hero?v=' + Date.now() : bgUrl()}" style="width:100%;aspect-ratio:16/10;object-fit:cover;display:block" loading="lazy" decoding="async" onerror="this.style.display='none'">
         </div>
         <div style="flex:1;min-width:220px">
           <div style="display:flex;gap:10px;flex-wrap:wrap">
@@ -1695,7 +1874,7 @@ function renderAppearancePage(el) {
     <div class="card">
       <div class="ov-title" style="margin-top:0">当前背景预览</div>
       <div style="border-radius:12px;overflow:hidden;border:1px solid var(--glass-border);max-height:260px">
-        <img src="${bgUrl()}" style="width:100%;object-fit:cover;max-height:260px;display:block" onerror="this.style.display='none'">
+        <img src="${bgUrl()}" style="width:100%;object-fit:cover;max-height:260px;display:block" loading="lazy" decoding="async" onerror="this.style.display='none'">
       </div>
       <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">
         <button class="btn btn-primary btn-sm" id="apUpload">↑ 上传新背景</button>

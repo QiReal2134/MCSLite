@@ -488,3 +488,38 @@ pre.log-preview {
   .instance-list { flex-direction: row; overflow-x: auto; }
   .hero-title { font-size: 20px; }
 }
+
+/* ══════════ 文件管理器与编辑器增强 ══════════ */
+.files-skeleton { padding: 16px; border-radius: 14px; }
+.sk-bar, .sk-row {
+  border-radius: 8px; height: 14px; margin: 10px 0;
+  background: linear-gradient(90deg, var(--glass-bg) 25%, var(--glass-bg-strong) 50%, var(--glass-bg) 75%);
+  background-size: 400px 100%; animation: shimmer 1.2s infinite linear;
+}
+.sk-bar { height: 24px; width: 40%; }
+.sk-row.w60 { width: 60%; } .sk-row.w70 { width: 70%; } .sk-row.w80 { width: 80%; }
+@keyframes shimmer { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
+
+.field-sm { width: 180px; padding: 6px 10px; font-size: 12.5px; }
+
+.file-table thead th { position: sticky; top: 0; z-index: 2; background: var(--glass-bg-strong); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.file-table th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.file-table th.sortable:hover { color: var(--accent); }
+
+.upload-bar {
+  margin: 10px 0; padding: 10px 14px; border-radius: 12px;
+  background: var(--glass-bg-strong); border: 1px solid var(--glass-border);
+}
+.upload-bar .bar { margin-top: 6px; }
+
+.file-editor {
+  width: 100%; min-height: 55vh; resize: vertical;
+  background: rgba(0,0,0,.4); color: var(--text);
+  border: 1px solid var(--glass-border); border-radius: 10px;
+  padding: 12px; font-family: var(--mono); font-size: 12.5px; line-height: 1.55;
+  tab-size: 2; white-space: pre;
+}
+.file-editor:focus { outline: none; border-color: var(--accent); }
+
+.img-preview { text-align: center; max-height: 60vh; overflow: auto; }
+.img-preview img { max-width: 100%; max-height: 58vh; border-radius: 10px; }

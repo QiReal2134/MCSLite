@@ -381,8 +381,9 @@ router.post('api/admin/instances/import', admin(async (req, res) => {
   const name = req.query.name || '';
   const localPath = req.query.path || '';
   if (!name) return fail(res, 400, '缺少实例名称(?name=)');
+  // 临时文件在 finally 统一清理:导入失败/上传中断也不能留下几百 MB 的残留
+  let tempFile = null;
   try {
-    let tempFile = null;
     if (localPath) {
       // 服务器本地路径导入
       const abs = safeResolve(ROOT, localPath);
@@ -401,10 +402,11 @@ router.post('api/admin/instances/import', admin(async (req, res) => {
       catch (e) { return fail(res, (e && e.status) || 400, (e && e.message) || '上传失败'); }
     }
     const ins = await im.importModpack({ name, tempFile });
-    try { fs.rmSync(tempFile, { force: true }); } catch {}
     ok(res, { instance: im.overview().find(i => i.id === ins.id) });
   } catch (e) {
     fail(res, 400, (e && e.message) || '导入失败');
+  } finally {
+    if (tempFile) { try { fs.rmSync(tempFile, { force: true }); } catch {} }
   }
 }));
 

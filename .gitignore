@@ -1,0 +1,15 @@
+# 运行时数据(含用户数据库/实例配置,严禁入库)
+data/
+servers/
+
+# 本机部署脚本与敏感文件(admin-pass.txt、证书、nginx 配置)
+.deploy/
+
+# 依赖与日志
+node_modules/
+*.log
+
+# 系统文件
+Thumbs.db
+Desktop.ini
+.DS_Store

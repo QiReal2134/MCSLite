@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MCSLite · Minecraft 服务器面板</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%234fc3f7'/><text x='50' y='74' font-size='62' fill='white' text-anchor='middle' font-family='sans-serif' font-weight='bold'>M</text></svg>">
+<link rel="stylesheet" href="/style.css?v=3">
+</head>
+<body>
+<div id="bg"></div>
+<div id="bgBlur"></div>
+
+<!-- ══════════ 玩家视图 ══════════ -->
+<div id="playerView" class="view">
+  <header class="topbar glass">
+    <div class="logo">MCSLite</div>
+    <div class="topbar-right">
+      <span id="pvClock" class="muted"></span>
+    </div>
+  </header>
+
+  <main class="pv-main">
+    <div id="pvHero" class="hero-row"></div>
+    <div id="pvGrid" class="pv-grid"></div>
+  </main>
+
+  <footer class="footer">MCSLite 轻量面板 · <span id="pvVer"></span></footer>
+</div>
+
+<!-- ══════════ 玩家·服务器详情视图(公开,无需登录) ══════════ -->
+<div id="detailView" class="view hidden">
+  <header class="topbar glass">
+    <button class="btn btn-sm" id="btnDetailBack">← 返回</button>
+    <div class="logo">服务器详情</div>
+    <div class="topbar-right"><span id="dtStatus" class="muted"></span></div>
+  </header>
+  <main class="pv-main">
+    <div id="dtContent"></div>
+  </main>
+</div>
+
+<!-- ══════════ 登录视图 ══════════ -->
+<div id="loginView" class="view hidden">
+  <div class="login-wrap">
+    <div class="login-card glass">
+      <div class="login-logo"><div class="login-title">MCSLite 管理后台</div>
+      <div class="login-sub muted">登录</div></div>
+      <form id="loginForm">
+        <label class="field">
+          <span>用户名</span>
+          <input id="loginUser" type="text" autocomplete="username" placeholder="admin" required>
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <input id="loginPass" type="password" autocomplete="current-password" placeholder="••••••••" required>
+        </label>
+        <div id="loginErr" class="form-err hidden"></div>
+        <button type="submit" class="btn btn-primary btn-block" id="loginBtn">登 录</button>
+      </form>
+      <button class="btn btn-ghost btn-block" id="btnBackPlayer">← 返回玩家视图</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 管理视图 ══════════ -->
+<div id="adminView" class="view hidden">
+  <aside class="sidebar glass">
+    <div class="logo sidebar-logo">MCSLite</div>
+    <div class="sidebar-label">服务器实例</div>
+    <div id="instanceList" class="instance-list"></div>
+    <button id="btnAddInstance" class="btn btn-primary btn-block">+ 新建 / 导入整合包</button>
+
+    <div class="sidebar-spacer"></div>
+    <nav class="side-nav">
+      <button class="nav-item active" data-nav="instances">实例管理</button>
+      <button class="nav-item" data-nav="java">Java管理</button>
+      <button class="nav-item" data-nav="ip">IP管理</button>
+      <button class="nav-item" data-nav="settings">设置</button>
+    </nav>
+    <button id="btnBackPlayer2" class="btn btn-ghost btn-block">← 玩家视图</button>
+  </aside>
+
+  <main class="admin-main">
+    <!-- 实例管理 -->
+    <div id="instancePage" class="page hidden">
+      <div id="instanceHeader" class="glass pad"></div>
+      <div class="tabs glass">
+        <button class="tab active" data-tab="overview">概览</button>
+        <button class="tab" data-tab="console">控制台</button>
+        <button class="tab" data-tab="files">文件管理</button>
+        <button class="tab" data-tab="backups">备份</button>
+        <button class="tab" data-tab="config">配置</button>
+      </div>
+      <div id="tabOverview" class="tab-pane"></div>
+      <div id="tabConsole" class="tab-pane hidden">
+        <div class="console-toolbar">
+          <input id="consoleInput" type="text" placeholder="输入指令,如 list / op" autocomplete="off">
+          <button id="btnConsoleSend" class="btn btn-primary">发送</button>
+        </div>
+        <div id="consoleBox" class="console glass"></div>
+      </div>
+      <div id="tabFiles" class="tab-pane hidden"></div>
+      <div id="tabBackups" class="tab-pane hidden"></div>
+      <div id="tabConfig" class="tab-pane hidden"></div>
+    </div>
+
+    <!-- Java 管理 -->
+    <div id="pageJava" class="page hidden"></div>
+    <!-- IP 管理 -->
+    <div id="pageIp" class="page hidden"></div>
+    <!-- 设置(外观 / 账号 / 关于) -->
+    <div id="pageSettings" class="page hidden"></div>
+  </main>
+</div>
+
+<div id="toast"></div>
+<div id="modalRoot"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

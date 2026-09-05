@@ -20,7 +20,7 @@ jobs:
 
       - name: 语法检查
         run: |
-          for f in server.js lib/*.js; do
+          for f in server.js lib/*.js web/app.js; do
             node --check "$f"
           done
 
@@ -50,6 +50,15 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' \
             "http://127.0.0.1:8399/api/status/%zz")
           test "$code" = "400" || { echo "畸形编码测试失败: $code"; exit 1; }
+
+          # 畸形 cookie 不能挂死请求(回归:decodeURIComponent 抛 URIError 导致连接悬挂)
+          code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Cookie: token=%' \
+            http://127.0.0.1:8399/api/status)
+          test "$code" = "200" || { echo "畸形 cookie 测试失败: $code"; exit 1; }
+
+          # HEAD 请求按 GET 处理,健康检查不 404
+          code=$(curl -s -I -o /dev/null -w '%{http_code}' http://127.0.0.1:8399/)
+          test "$code" = "200" || { echo "HEAD 测试失败: $code"; exit 1; }
 
           # 未登录访问管理接口必须 401
           code=$(curl -s -o /dev/null -w '%{http_code}' \

@@ -8,6 +8,15 @@ const os = require('os');
 const { URL } = require('url');
 const { spawn, spawnSync } = require('child_process');
 
+// 账号存储依赖内置 node:sqlite(Node 22.5 引入,22.13 起无需 flag)
+const NODE_MIN = [22, 13];
+const [nvMaj, nvMin] = process.versions.node.split('.').map(Number);
+if (nvMaj < NODE_MIN[0] || (nvMaj === NODE_MIN[0] && nvMin < NODE_MIN[1])) {
+  console.error(`[面板] 需要 Node.js v${NODE_MIN.join('.')} 或更高版本,当前为 v${process.versions.node}`);
+  console.error('[面板] 请到 https://nodejs.org 升级后重试');
+  process.exit(1);
+}
+
 const { createRouter, staticServe, MIME } = require('./lib/router');
 const { Auth } = require('./lib/auth');
 const { InstanceManager } = require('./lib/instances');
@@ -281,7 +290,7 @@ router.get('api/status/:id/save', async (req, res) => {
 // ---------- 认证 ----------
 router.post('api/login', async (req, res) => {
   let body;
-  try { body = JSON.parse((await readBody(req, 64 * 1024)).toString('utf8')); }
+  try { body = await readJsonBody(req, 64 * 1024); }
   catch { return fail(res, 400, '请求格式错误'); }
   const name = String(body.username || '').trim();
   const pw = String(body.password || '');
@@ -302,7 +311,7 @@ router.post('api/login', async (req, res) => {
 router.post('api/logout', (req, res) => {
   const cookie = req.headers.cookie || '';
   const m = /(?:^|;\s*)token=([^;]+)/.exec(cookie);
-  if (m) auth.destroy(decodeURIComponent(m[1]));
+  if (m) { try { auth.destroy(decodeURIComponent(m[1])); } catch {} }
   auth.clearCookie(res);
   ok(res, {});
 });
@@ -320,7 +329,7 @@ function admin(fn) {
     if (fn._admin && !auth.requireAdmin(req, res)) return;
     Promise.resolve()
       .then(() => fn(req, res))
-      .catch(e => { try { fail(res, 500, (e && e.message) || '服务器错误'); } catch {} });
+      .catch(e => { try { fail(res, (e && e.status) || 500, (e && e.message) || '服务器错误'); } catch {} });
   };
 }
 admin.admin = (fn) => { fn._admin = true; return admin(fn); };
@@ -362,7 +371,7 @@ router.get('api/admin/java/status', admin((req, res) => {
 
 // 实例:创建 / 导入 / 删除
 router.post('api/admin/instances', admin(async (req, res) => {
-  const body = JSON.parse((await readBody(req, 64 * 1024)).toString('utf8'));
+  const body = await readJsonBody(req, 64 * 1024);
   const ins = im.create({ name: body.name });
   ok(res, { instance: im.overview().find(i => i.id === ins.id) });
 }));
@@ -387,8 +396,9 @@ router.post('api/admin/instances/import', admin(async (req, res) => {
       if (!/zip|octet-stream|gzip|x-tar/.test(ct)) return fail(res, 400, '请上传 .zip / .tar.gz 整合包');
       tempFile = path.join(TMP_DIR, uid(10) + '.zip');
       const maxSize = (config.maxUploadMB || 4096) * 1024 * 1024;
+      if (rejectTooLarge(req, res, maxSize)) return;
       try { await pipeToFile(req, tempFile, maxSize); }
-      catch (e) { return fail(res, 400, (e && e.message) || '上传失败'); }
+      catch (e) { return fail(res, (e && e.status) || 400, (e && e.message) || '上传失败'); }
     }
     const ins = await im.importModpack({ name, tempFile });
     try { fs.rmSync(tempFile, { force: true }); } catch {}
@@ -430,7 +440,7 @@ router.get('api/admin/instances/:id/config', admin(async (req, res) => {
 router.put('api/admin/instances/:id/config', admin(async (req, res) => {
   const ins = im.get(req.params.id);
   if (!ins) return fail(res, 404, '实例不存在');
-  const body = JSON.parse((await readBody(req, 64 * 1024)).toString('utf8'));
+  const body = await readJsonBody(req, 64 * 1024);
   const allow = ['name', 'javaPath', 'javaRequirement', 'xms', 'xmx', 'jvmArgs', 'serverJar', 'autoStart', 'eula'];
   for (const k of allow) {
     if (k in body) {
@@ -443,7 +453,8 @@ router.put('api/admin/instances/:id/config', admin(async (req, res) => {
   if ('backupInterval' in body) ins.backupInterval = Math.max(1, parseInt(body.backupInterval, 10) || 60);
   if ('backupMax' in body) ins.backupMax = Math.max(1, parseInt(body.backupMax, 10) || 10);
   if ('backupPattern' in body) ins.backupPattern = String(body.backupPattern || '').slice(0, 100);
-  if (ins.name && !String(ins.name).trim()) ins.name = ins.dir;
+  // 实例名留空时回退为目录名
+  if (!String(ins.name || '').trim()) ins.name = ins.dir;
   ins.updatedAt = now();
   im.save();
   ok(res, { config: { name: ins.name, javaPath: ins.javaPath, javaRequirement: ins.javaRequirement, xms: ins.xms, xmx: ins.xmx, jvmArgs: ins.jvmArgs, serverJar: ins.serverJar, autoStart: ins.autoStart, eula: ins.eula, backupEnabled: ins.backupEnabled, backupInterval: ins.backupInterval, backupMax: ins.backupMax, backupPattern: ins.backupPattern } });
@@ -461,7 +472,7 @@ router.get('api/admin/instances/:id/backups', admin((req, res) => {
 }));
 router.post('api/admin/instances/:id/backups', admin(async (req, res) => {
   let body = {};
-  try { body = JSON.parse((await readBody(req, 16 * 1024)).toString('utf8')); } catch {}
+  try { body = await readJsonBody(req, 16 * 1024); } catch {}
   try {
     const r = await im.createBackup(req.params.id, { isAuto: false, name: body.name });
     ok(res, { backup: r });
@@ -501,7 +512,7 @@ router.put('api/admin/instances/:id/properties', admin(async (req, res) => {
   const ins = im.get(req.params.id);
   if (!ins) return fail(res, 404, '实例不存在');
   let body;
-  try { body = JSON.parse((await readBody(req, 256 * 1024)).toString('utf8')); }
+  try { body = await readJsonBody(req, 256 * 1024); }
   catch { return fail(res, 400, '请求格式错误'); }
   const patch = body.patch || body;
   if (typeof patch !== 'object' || Array.isArray(patch)) return fail(res, 400, '参数错误');
@@ -524,7 +535,7 @@ router.get('api/admin/instances/:id/log', admin((req, res) => {
 router.get('api/admin/instances/:id/stream', admin((req, res) => {
   const ins = im.get(req.params.id);
   if (!ins) return fail(res, 404, '实例不存在');
-  const kill = hub.subscribe(res);
+  const kill = hub.subscribe(res, ins.id);
   // 回放最近日志
   const lines = im.logLines(ins.id);
   for (const line of lines.slice(-400)) {
@@ -538,7 +549,7 @@ router.get('api/admin/instances/:id/stream', admin((req, res) => {
 
 // 控制台命令
 router.post('api/admin/instances/:id/command', admin(async (req, res) => {
-  const body = JSON.parse((await readBody(req, 16 * 1024)).toString('utf8'));
+  const body = await readJsonBody(req, 16 * 1024);
   try { im.command(req.params.id, body.cmd); ok(res, {}); }
   catch (e) { fail(res, 400, e.message); }
 }));
@@ -567,7 +578,7 @@ router.get('api/admin/instances/:id/file', admin(async (req, res) => {
 router.put('api/admin/instances/:id/file', admin(async (req, res) => {
   const root = fileRoot(req);
   if (!root) return fail(res, 404, '实例不存在');
-  const body = JSON.parse((await readBody(req, 8 * 1024 * 1024)).toString('utf8'));
+  const body = await readJsonBody(req, 8 * 1024 * 1024);
   try { await F.writeFile(root, req.query.path || '', body.content ?? ''); ok(res, {}); }
   catch (e) { fail(res, 400, e.message); }
 }));
@@ -579,9 +590,10 @@ router.post('api/admin/instances/:id/upload', admin((req, res) => {
   const filename = req.query.filename || uid(8);
   const rel = (dir + '/' + filename).replace(/\/+/g, '/');
   const maxSize = (config.maxUploadMB || 4096) * 1024 * 1024;
+  if (rejectTooLarge(req, res, maxSize)) return;
   F.uploadStream(root, rel, req, maxSize)
     .then(size => ok(res, { size }))
-    .catch(e => fail(res, 400, e.message));
+    .catch(e => fail(res, (e && e.status) || 400, e.message));
 }));
 
 router.get('api/admin/instances/:id/download', admin((req, res) => {
@@ -604,7 +616,7 @@ router.get('api/admin/instances/:id/download', admin((req, res) => {
 router.post('api/admin/instances/:id/mkdir', admin(async (req, res) => {
   const root = fileRoot(req);
   if (!root) return fail(res, 404, '实例不存在');
-  const body = JSON.parse((await readBody(req, 16 * 1024)).toString('utf8'));
+  const body = await readJsonBody(req, 16 * 1024);
   try { await F.mkdir(root, body.path || ''); ok(res, {}); }
   catch (e) { fail(res, 400, e.message); }
 }));
@@ -612,7 +624,7 @@ router.post('api/admin/instances/:id/mkdir', admin(async (req, res) => {
 router.post('api/admin/instances/:id/rename', admin(async (req, res) => {
   const root = fileRoot(req);
   if (!root) return fail(res, 404, '实例不存在');
-  const body = JSON.parse((await readBody(req, 16 * 1024)).toString('utf8'));
+  const body = await readJsonBody(req, 16 * 1024);
   try { await F.rename(root, body.path || '', body.newName); ok(res, {}); }
   catch (e) { fail(res, 400, e.message); }
 }));
@@ -620,7 +632,7 @@ router.post('api/admin/instances/:id/rename', admin(async (req, res) => {
 router.post('api/admin/instances/:id/delete', admin(async (req, res) => {
   const root = fileRoot(req);
   if (!root) return fail(res, 404, '实例不存在');
-  const body = JSON.parse((await readBody(req, 16 * 1024)).toString('utf8'));
+  const body = await readJsonBody(req, 16 * 1024);
   try { await F.remove(root, body.path || ''); ok(res, {}); }
   catch (e) { fail(res, 400, e.message); }
 }));
@@ -628,7 +640,7 @@ router.post('api/admin/instances/:id/delete', admin(async (req, res) => {
 router.post('api/admin/instances/:id/extract', admin(async (req, res) => {
   const root = fileRoot(req);
   if (!root) return fail(res, 404, '实例不存在');
-  const body = JSON.parse((await readBody(req, 16 * 1024)).toString('utf8'));
+  const body = await readJsonBody(req, 16 * 1024);
   try { await F.extract(root, body.path || ''); ok(res, {}); }
   catch (e) { fail(res, 400, e.message); }
 }));
@@ -657,7 +669,7 @@ function isValidIPv4(ip) {
 }
 
 router.post('api/admin/ips', admin(async (req, res) => {
-  const body = JSON.parse((await readBody(req, 16 * 1024)).toString('utf8'));
+  const body = await readJsonBody(req, 16 * 1024);
   const ip = String(body.ip || '').trim();
   if (!isValidIPv4(ip)) return fail(res, 400, 'IP 格式不正确');
   if (!config.panel.ipList.includes(ip)) {
@@ -676,7 +688,7 @@ router.delete('api/admin/ips/:ip', admin(async (req, res) => {
 }));
 
 router.put('api/admin/settings', admin(async (req, res) => {
-  const body = JSON.parse((await readBody(req, 64 * 1024)).toString('utf8'));
+  const body = await readJsonBody(req, 64 * 1024);
   if ('background' in body) {
     const rel = String(body.background || '');
     const abs = safeResolve(ROOT, rel);
@@ -717,8 +729,9 @@ router.post('api/admin/hero-image', admin(async (req, res) => {
   const ext = ct.includes('png') ? '.png' : ct.includes('webp') ? '.webp' : ct.includes('gif') ? '.gif' : '.jpg';
   const file = path.join(BG_DIR, 'hero-' + uid(8) + ext);
   const maxSize = 20 * 1024 * 1024;
+  if (rejectTooLarge(req, res, maxSize)) return;
   try { await pipeToFile(req, file, maxSize); }
-  catch (e) { return fail(res, 400, (e && e.message) || '上传失败'); }
+  catch (e) { return fail(res, (e && e.status) || 400, (e && e.message) || '上传失败'); }
   config.panel.heroImage = path.relative(ROOT, file).replace(/\\/g, '/');
   saveConfig(config);
   ok(res, { heroImage: config.panel.heroImage, url: '/hero?v=' + now() });
@@ -730,8 +743,9 @@ router.post('api/admin/background', admin(async (req, res) => {
   const ext = ct.includes('png') ? '.png' : ct.includes('webp') ? '.webp' : ct.includes('gif') ? '.gif' : '.jpg';
   const file = path.join(BG_DIR, 'bg-' + uid(8) + ext);
   const maxSize = 20 * 1024 * 1024;
+  if (rejectTooLarge(req, res, maxSize)) return;
   try { await pipeToFile(req, file, maxSize); }
-  catch (e) { return fail(res, 400, (e && e.message) || '上传失败'); }
+  catch (e) { return fail(res, (e && e.status) || 400, (e && e.message) || '上传失败'); }
   config.panel.background = path.relative(ROOT, file).replace(/\\/g, '/');
   saveConfig(config);
   ok(res, { background: config.panel.background, url: '/bg?v=' + now() });
@@ -739,7 +753,7 @@ router.post('api/admin/background', admin(async (req, res) => {
 
 // 修改密码(SQLite 存储,scrypt 哈希)
 router.post('api/admin/password', admin(async (req, res) => {
-  const body = JSON.parse((await readBody(req, 64 * 1024)).toString('utf8'));
+  const body = await readJsonBody(req, 64 * 1024);
   if (!body.new || String(body.new).length < 6) return fail(res, 400, '新密码至少 6 位');
   try {
     auth.changePassword(req.session.name, body.old || '', String(body.new));
@@ -752,7 +766,7 @@ router.get('api/admin/users', admin.admin(async (req, res) => {
   ok(res, { users: auth.list() });
 }));
 router.post('api/admin/users', admin.admin(async (req, res) => {
-  const body = JSON.parse((await readBody(req, 64 * 1024)).toString('utf8'));
+  const body = await readJsonBody(req, 64 * 1024);
   const name = String(body.name || '').trim();
   if (!/^[A-Za-z0-9_\u4e00-\u9fa5]{2,20}$/.test(name)) return fail(res, 400, '用户名需 2-20 位(字母/数字/下划线/中文)');
   if (!body.password || String(body.password).length < 6) return fail(res, 400, '密码至少 6 位');
@@ -797,13 +811,42 @@ router.get('admin/', serveIndex);
 router.get('*', staticServe(WEB_DIR));
 
 // ---------- 工具 ----------
+// 读取并解析 JSON 请求体;格式错误抛出带 status=400 的错误,由统一兜底返回 400 而非 500
+async function readJsonBody(req, limit) {
+  const raw = await readBody(req, limit);
+  try { return JSON.parse(raw.toString('utf8')); }
+  catch { throw Object.assign(new Error('请求格式错误'), { status: 400 }); }
+}
+
+// 上传预检:请求头声明的大小超限直接 413,不进入读流(浏览器能正常收到错误提示,
+// 而不是连接被重置后只看到网络错误)
+function rejectTooLarge(req, res, maxSize) {
+  const len = parseInt(req.headers['content-length'] || '0', 10);
+  if (len > maxSize) {
+    res.setHeader('Connection', 'close');
+    fail(res, 413, `文件超过大小限制(最大 ${Math.round(maxSize / 1024 / 1024)} MB)`);
+    // 暂停读取让响应先送达,随后断开,避免半截上传悬挂占用连接
+    req.pause();
+    setTimeout(() => { try { req.destroy(); } catch {} }, 2000);
+    return true;
+  }
+  return false;
+}
+
 function pipeToFile(req, file, maxSize) {
   return new Promise((resolve, reject) => {
     const ws = fs.createWriteStream(file);
     let size = 0;
+    let tooBig = false;
     req.on('data', c => {
       size += c.length;
-      if (size > maxSize) { ws.destroy(); req.destroy(); reject(new Error('文件超过大小限制')); }
+      if (size > maxSize && !tooBig) {
+        tooBig = true;
+        ws.destroy(); req.destroy();
+        // Windows 下需等写入句柄关闭才能删除半截文件
+        ws.on('close', () => { try { fs.unlink(file, () => {}); } catch {} });
+        reject(Object.assign(new Error('文件超过大小限制'), { status: 413 }));
+      }
     });
     ws.on('error', reject);
     ws.on('finish', () => resolve(size));
@@ -866,7 +909,9 @@ function shutdown(sig) {
   (async () => {
     // 退出前落盘所有配置,确保不丢
     try { im.save(); saveConfig(config); } catch {}
-    const running = im.instances.filter(i => i.isRunning(i) && i.stopOnExit);
+    // 停止所有运行中的实例(面板自重启走 /api/admin/restart 的 detached 拉起,不经过这里;
+    // 重启后新进程会按 pid 收养仍在运行的服务端)
+    const running = im.instances.filter(i => im.isRunning(i));
     for (const ins of running) {
       console.log(`[面板] 停止实例 ${ins.name}`);
       try { await im.stop(ins.id); } catch {}

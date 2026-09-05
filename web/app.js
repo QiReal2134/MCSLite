@@ -196,6 +196,22 @@ document.addEventListener('click', (e) => {
   closeAllGlassMenus();
 });
 
+// CSP 禁止内联 onerror 属性:img 加载失败统一在此委托处理
+// (资源 error 事件不冒泡,须用捕获阶段监听)
+// data-err="hide" → 隐藏图片;data-err="msg" → 替换为提示文字
+document.addEventListener('error', (e) => {
+  const img = e.target;
+  if (!img || img.tagName !== 'IMG') return;
+  if (img.dataset.err === 'msg') {
+    const tip = document.createElement('div');
+    tip.className = 'muted';
+    tip.textContent = '图片无法加载';
+    img.replaceWith(tip);
+  } else if (img.dataset.err === 'hide') {
+    img.style.display = 'none';
+  }
+}, true);
+
 // 把区域内所有 <select> 升级为玻璃下拉(原生弹出层无法加模糊;原 select 保留隐藏,值同步)
 function upgradeSelects(root) {
   if (!root) return;
@@ -302,7 +318,7 @@ function renderHero(d) {
       <div class="hero-sub">${esc(slogan)}</div>
     </div>
     <div class="hero-img-panel">
-      <img src="${imgSrc}" alt="服务器图片" loading="lazy" decoding="async" onerror="this.style.display='none'">
+      <img src="${imgSrc}" alt="服务器图片" loading="lazy" decoding="async" data-err="hide">
     </div>`;
 }
 
@@ -399,7 +415,7 @@ function renderDetail(i) {
     const name = pl.name || pl;
     return `
       <div class="player-row">
-        <img class="avatar" src="https://mc-heads.net/avatar/${encodeURIComponent(name)}/48" loading="lazy" alt="" onerror="this.onerror=null;this.src='${avatarFallback(name)}'">
+        <img class="avatar" src="${avatarFallback(name)}" loading="lazy" alt="">
         <span class="p-name">${esc(name)}</span>
         ${pl.admin ? `<span class="badge op">管理员</span>` : `<span class="badge">玩家</span>`}
       </div>`;
@@ -412,7 +428,7 @@ function renderDetail(i) {
         <div class="hero-sub">${esc(p ? p.motd : (on ? '欢迎来到我们的世界' : '服务器未运行'))}</div>
       </div>
       <div class="hero-img-panel">
-        <img src="${bgUrl()}" alt="" onerror="this.style.display='none'">
+        <img src="${bgUrl()}" alt="" data-err="hide">
       </div>
     </div>
     <div class="stat-cards">
@@ -831,7 +847,7 @@ function renderOverview(cur) {
     const name = pl.name || pl;
     return `
       <div class="player-row">
-        <img class="avatar" src="https://mc-heads.net/avatar/${encodeURIComponent(name)}/48" loading="lazy" alt="" onerror="this.onerror=null;this.src='${avatarFallback(name)}'">
+        <img class="avatar" src="${avatarFallback(name)}" loading="lazy" alt="">
         <span class="p-name">${esc(name)}</span>
         ${pl.admin ? `<span class="badge op">管理员</span>` : `<span class="badge">玩家</span>`}
       </div>`;
@@ -993,24 +1009,7 @@ function renderFileList(data) {
   const s = state.fileSort || { key: 'name', dir: 1 };
   const arrow = (key) => s.key === key ? (s.dir > 0 ? ' ▲' : ' ▼') : '';
   const list = fileView(state.fileEntries || []);
-  const rows = list.map(f => {
-    const size = f.dir ? '—' : fmtBytes(f.size);
-    const time = f.mtime ? new Date(f.mtime).toLocaleString('zh-CN', { hour12: false }) : '—';
-    return `<tr>
-      <td><span class="fname" data-kind="${f.dir ? 'dir' : 'file'}" data-name="${esc(f.name)}">${esc(f.name)}</span></td>
-      <td>${f.dir ? '目录' : '文件'}</td>
-      <td class="mono">${size}</td>
-      <td class="muted" style="font-size:12px">${time}</td>
-      <td><div class="factions">
-        ${!f.dir ? `<button class="faction" data-act="download" data-name="${esc(f.name)}">下载</button>
-        <button class="faction" data-act="edit" data-name="${esc(f.name)}">编辑</button>` : ''}
-        ${f.img ? `<button class="faction" data-act="preview" data-name="${esc(f.name)}">预览</button>` : ''}
-        ${!f.dir && (f.name.toLowerCase().endsWith('.zip') || f.name.toLowerCase().endsWith('.gz') || f.name.toLowerCase().endsWith('.tgz')) ? `<button class="faction" data-act="extract" data-name="${esc(f.name)}">解压</button>` : ''}
-        <button class="faction" data-act="rename" data-name="${esc(f.name)}">重命名</button>
-        <button class="faction del" data-act="delete" data-name="${esc(f.name)}">删除</button>
-      </div></td>
-    </tr>`;
-  }).join('');
+  const rows = list.map(fileRowHtml).join('');
 
   el.innerHTML = `
     <div class="file-toolbar">
@@ -1050,18 +1049,9 @@ function renderFileList(data) {
     const kw = state.fileFilter.toLowerCase();
     const view = fileView(state.fileEntries || []);
     const tb = $('#fileRows', el);
-    tb.innerHTML = view.map(f => {
-      const size = f.dir ? '—' : fmtBytes(f.size);
-      const time = f.mtime ? new Date(f.mtime).toLocaleString('zh-CN', { hour12: false }) : '—';
-      return `<tr>
-        <td><span class="fname" data-kind="${f.dir ? 'dir' : 'file'}" data-name="${esc(f.name)}">${esc(f.name)}</span></td>
-        <td>${f.dir ? '目录' : '文件'}</td>
-        <td class="mono">${size}</td>
-        <td class="muted" style="font-size:12px">${time}</td>
-        <td></td>
-      </tr>`;
-    }).join('') || '<tr><td colspan="5" class="muted">无匹配项</td></tr>';
+    tb.innerHTML = view.map(fileRowHtml).join('') || '<tr><td colspan="5" class="muted">无匹配项</td></tr>';
     bindFileNames(tb);
+    bindFileActions(tb);
   };
   // 排序
   $$('th.sortable', el).forEach(th => {
@@ -1074,7 +1064,51 @@ function renderFileList(data) {
   // 双击/点击文件名
   bindFileNames(el);
   // 操作按钮
-  $$('.faction', el).forEach(b => {
+  bindFileActions(el);
+
+  $('#btnUpload', el).onclick = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.onchange = () => { if (input.files.length) uploadFiles(Array.from(input.files)); };
+    input.click();
+  };
+  $('#btnNewFolder', el).onclick = () => promptText('新建文件夹', '', '请输入文件夹名称', async (name) => {
+    if (!name) return;
+    try { await post(`/api/admin/instances/${state.currentId}/mkdir`, { path: joinPath(state.filePath, name) }); renderFiles(); }
+    catch (e) { toast(e.message, 'err'); }
+  });
+  $('#btnNewFile', el).onclick = () => promptText('新建文件', '', '请输入文件名(含扩展名)', async (name) => {
+    if (!name) return;
+    try { await put(`/api/admin/instances/${state.currentId}/file?path=${encodeURIComponent(joinPath(state.filePath, name))}`, { content: '' }); renderFiles(); }
+    catch (e) { toast(e.message, 'err'); }
+  });
+  $('#btnRefreshFiles', el).onclick = renderFiles;
+}
+
+// 文件列表单行 HTML(完整列表与过滤重绘共用,操作列保持一致)
+function fileRowHtml(f) {
+  const size = f.dir ? '—' : fmtBytes(f.size);
+  const time = f.mtime ? new Date(f.mtime).toLocaleString('zh-CN', { hour12: false }) : '—';
+  return `<tr>
+    <td><span class="fname" data-kind="${f.dir ? 'dir' : 'file'}" data-name="${esc(f.name)}">${esc(f.name)}</span></td>
+    <td>${f.dir ? '目录' : '文件'}</td>
+    <td class="mono">${size}</td>
+    <td class="muted" style="font-size:12px">${time}</td>
+    <td><div class="factions">
+      ${!f.dir ? `<button class="faction" data-act="download" data-name="${esc(f.name)}">下载</button>
+      <button class="faction" data-act="edit" data-name="${esc(f.name)}">编辑</button>` : ''}
+      ${f.img ? `<button class="faction" data-act="preview" data-name="${esc(f.name)}">预览</button>` : ''}
+      ${!f.dir && (f.name.toLowerCase().endsWith('.zip') || f.name.toLowerCase().endsWith('.gz') || f.name.toLowerCase().endsWith('.tgz')) ? `<button class="faction" data-act="extract" data-name="${esc(f.name)}">解压</button>` : ''}
+      <button class="faction" data-act="rename" data-name="${esc(f.name)}">重命名</button>
+      <button class="faction del" data-act="delete" data-name="${esc(f.name)}">删除</button>
+    </div></td>
+  </tr>`;
+}
+
+// 绑定文件操作按钮(下载/编辑/预览/解压/重命名/删除);过滤重绘时复用
+function bindFileActions(scope) {
+  $$('.faction', scope).forEach(b => {
     b.onclick = async () => {
       const act = b.dataset.act;
       const name = b.dataset.name;
@@ -1097,25 +1131,6 @@ function renderFileList(data) {
       }
     };
   });
-
-  $('#btnUpload', el).onclick = () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.multiple = true;
-    input.onchange = () => { if (input.files.length) uploadFiles(Array.from(input.files)); };
-    input.click();
-  };
-  $('#btnNewFolder', el).onclick = () => promptText('新建文件夹', '', '请输入文件夹名称', async (name) => {
-    if (!name) return;
-    try { await post(`/api/admin/instances/${state.currentId}/mkdir`, { path: joinPath(state.filePath, name) }); renderFiles(); }
-    catch (e) { toast(e.message, 'err'); }
-  });
-  $('#btnNewFile', el).onclick = () => promptText('新建文件', '', '请输入文件名(含扩展名)', async (name) => {
-    if (!name) return;
-    try { await put(`/api/admin/instances/${state.currentId}/file?path=${encodeURIComponent(joinPath(state.filePath, name))}`, { content: '' }); renderFiles(); }
-    catch (e) { toast(e.message, 'err'); }
-  });
-  $('#btnRefreshFiles', el).onclick = renderFiles;
 }
 
 // 绑定文件名点击(进入目录/打开编辑器);过滤重绘时复用
@@ -1193,7 +1208,7 @@ function previewImage(name) {
   const url = `/api/admin/instances/${state.currentId}/download?path=${encodeURIComponent(joinPath(state.filePath, name))}`;
   const { modal } = openModal(`
     <h3>${esc(name)}</h3>
-    <div class="img-preview"><img src="${url}" alt="${esc(name)}" loading="lazy" decoding="async" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'muted',textContent:'图片无法加载'}))"></div>
+    <div class="img-preview"><img src="${url}" alt="${esc(name)}" loading="lazy" decoding="async" data-err="msg"></div>
     <div class="modal-actions"><button class="btn" id="pvClose">关闭</button></div>`);
   $('#pvClose', modal).onclick = closeModal;
 }
@@ -1854,7 +1869,7 @@ function renderAppearancePage(el) {
       <div class="ov-title" style="margin:6px 0 8px;font-size:13.5px">B · 首页图片(留空=跟随背景)</div>
       <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
         <div style="width:220px;border-radius:12px;overflow:hidden;border:1px solid var(--glass-border);flex-shrink:0">
-          <img id="hpPreview" src="${hero.heroImage ? '/hero?v=' + Date.now() : bgUrl()}" style="width:100%;aspect-ratio:16/10;object-fit:cover;display:block" loading="lazy" decoding="async" onerror="this.style.display='none'">
+          <img id="hpPreview" src="${hero.heroImage ? '/hero?v=' + Date.now() : bgUrl()}" style="width:100%;aspect-ratio:16/10;object-fit:cover;display:block" loading="lazy" decoding="async" data-err="hide">
         </div>
         <div style="flex:1;min-width:220px">
           <div style="display:flex;gap:10px;flex-wrap:wrap">
@@ -1874,7 +1889,7 @@ function renderAppearancePage(el) {
     <div class="card">
       <div class="ov-title" style="margin-top:0">当前背景预览</div>
       <div style="border-radius:12px;overflow:hidden;border:1px solid var(--glass-border);max-height:260px">
-        <img src="${bgUrl()}" style="width:100%;object-fit:cover;max-height:260px;display:block" loading="lazy" decoding="async" onerror="this.style.display='none'">
+        <img src="${bgUrl()}" style="width:100%;object-fit:cover;max-height:260px;display:block" loading="lazy" decoding="async" data-err="hide">
       </div>
       <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">
         <button class="btn btn-primary btn-sm" id="apUpload">↑ 上传新背景</button>

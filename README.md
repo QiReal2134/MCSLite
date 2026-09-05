@@ -15,7 +15,7 @@
 
 ## 快速开始
 
-1. 安装 [Node.js](https://nodejs.org) 18+
+1. 安装 [Node.js](https://nodejs.org) 22.13+(账号存储使用内置 `node:sqlite`)
 2. 安装 Java 8 / 17 / 21(面板自动检测)
 3. 双击 `start.bat`,或执行 `node server.js`
 4. 浏览器打开 http://127.0.0.1:8333

@@ -394,13 +394,13 @@ async function loadDetail() {
   if (!id) return;
   try {
     const data = await get('/api/status/' + id);
-    renderDetail(data.instance || {});
+    renderDetail(data.instance || {}, !!data.publicDownload);
   } catch (e) {
     $('#dtContent').innerHTML = `<div class="card"><div class="muted">${esc(e.message)}</div></div>`;
   }
 }
 
-function renderDetail(i) {
+function renderDetail(i, canDownload) {
   const el = $('#dtContent');
   const on = i.status === 'running';
   const p = i.ping && i.ping.online ? i.ping : null;
@@ -445,9 +445,9 @@ function renderDetail(i) {
     <div class="card">
       ${sample.length ? playerRows : (on ? '<div class="hero-empty muted">暂无玩家在线</div>' : '<div class="hero-empty muted">服务器未运行</div>')}
     </div>
-    <div class="ov-title">存档下载</div>
-    <div class="card" id="dtBackups"><div class="muted">加载中...</div></div>`;
-  loadPlayerBackups(id);
+    ${canDownload ? `<div class="ov-title">存档下载</div>
+    <div class="card" id="dtBackups"><div class="muted">加载中...</div></div>` : ''}`;
+  if (canDownload) loadPlayerBackups(i.id);
 }
 
 // 玩家详情页:备份列表 + 实时存档下载(每 IP 120 秒限 1 次)
@@ -1897,6 +1897,18 @@ function renderAppearancePage(el) {
         <button class="btn btn-sm" id="apPickDefault">使用面板目录内的图片</button>
       </div>
       <div class="hint" style="margin-top:10px">建议 1920×1080 以上</div>
+    </div>
+
+    <div class="ov-title">玩家端下载</div>
+    <div class="card">
+      <div class="cfg-item">
+        <label>允许未登录玩家下载存档与备份</label>
+        <input type="checkbox" id="pdToggle" ${state.panel.publicDownload ? 'checked' : ''}>
+      </div>
+      <div class="hint" style="margin-top:10px">
+        关闭时「存档下载」只对已登录用户可见。世界存档与备份含玩家数据,
+        且每次打包都会让在线服务端暂停保存并全量压缩,建议仅在确有必要时开放。
+      </div>
     </div>`;
   $('#apUpload', el).onclick = () => {
     const input = document.createElement('input');
@@ -1943,6 +1955,19 @@ function renderAppearancePage(el) {
         } catch (e) { toast(e.message, 'err'); }
       };
     });
+  };
+
+  // ---- 玩家端下载开关 ----
+  $('#pdToggle', el).onchange = async (e) => {
+    const on = e.target.checked;
+    try {
+      const data = await put('/api/admin/settings', { publicDownload: on });
+      state.panel.publicDownload = !!data.panel.publicDownload;
+      toast(on ? '已开放玩家端下载' : '已关闭玩家端下载(仅登录用户)', 'ok');
+    } catch (err) {
+      e.target.checked = !on;
+      toast(err.message, 'err');
+    }
   };
 
   // ---- A 标题 / C 标语 保存 ----
@@ -2022,6 +2047,7 @@ function renderAppearancePage(el) {
 /* ---------- 账号页 ---------- */
 async function renderAccountPage(el) {
   if (!el) return;
+  const isAdmin = !!(state.user && state.user.role === 'admin');
   el.innerHTML = `
     <div class="ov-title">修改密码</div>
     <div class="card" style="max-width:420px">
@@ -2030,7 +2056,26 @@ async function renderAccountPage(el) {
       <label class="field"><span>确认新密码</span><input id="pwNew2" type="password"></label>
       <button class="btn btn-primary" id="pwSave">保存新密码</button>
       ${state.user && state.user.mustChange ? '<div class="hint" style="color:#ffb300;margin-top:10px">您正在使用默认密码,为了服务器安全请立即修改!</div>' : ''}
-    </div>`;
+    </div>
+    ${isAdmin ? `
+    <div class="ov-title">用户管理</div>
+    <div class="card">
+      <div class="muted" style="font-size:12px;margin-bottom:8px">
+        管理员可管理用户与全部设置;操作员可使用面板所有功能。
+      </div>
+      <div id="userRows"><div class="muted">加载中...</div></div>
+      <div class="divider"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input id="nuName" class="field field-sm" type="text" placeholder="用户名" style="width:150px">
+        <input id="nuPw" class="field field-sm" type="password" placeholder="密码 (至少 6 位)" style="width:150px">
+        <select id="nuRole" class="field field-sm" style="width:110px">
+          <option value="operator">操作员</option>
+          <option value="admin">管理员</option>
+        </select>
+        <button class="btn btn-primary btn-sm" id="nuAdd">添加用户</button>
+      </div>
+    </div>` : ''}`;
+
   $('#pwSave', el).onclick = async () => {
     const old = $('#pwOld', el).value, n1 = $('#pwNew', el).value, n2 = $('#pwNew2', el).value;
     if (n1 !== n2) return toast('两次输入的新密码不一致', 'err');
@@ -2039,6 +2084,48 @@ async function renderAccountPage(el) {
       toast('密码已修改', 'ok');
       state.user.mustChange = false;
       $('#pwOld', el).value = $('#pwNew', el).value = $('#pwNew2', el).value = '';
+    } catch (e) { toast(e.message, 'err'); }
+  };
+
+  if (!isAdmin) return;
+
+  const renderUsers = (users) => {
+    const box = $('#userRows', el);
+    if (!box) return;
+    box.innerHTML = users.length ? users.map(u => `
+      <div class="player-row">
+        <span class="p-name">${esc(u.name)}</span>
+        <span class="badge ${u.role === 'admin' ? 'op' : ''}">${u.role === 'admin' ? '管理员' : '操作员'}</span>
+        ${state.user && state.user.name === u.name ? '<span class="muted" style="font-size:12px">当前登录</span>' : ''}
+        <span style="flex:1"></span>
+        <button class="btn btn-sm btn-danger" data-del="${esc(u.name)}">删除</button>
+      </div>`).join('') : '<div class="muted">暂无用户</div>';
+    $$('[data-del]', box).forEach(b => {
+      b.onclick = async () => {
+        const name = b.dataset.del;
+        if (!await confirmDialog('删除用户', `确定删除用户「${name}」?其登录会话将立即失效。`, true)) return;
+        try {
+          const data = await del('/api/admin/users/' + encodeURIComponent(name));
+          renderUsers(data.users || []);
+          toast('用户已删除', 'ok');
+        } catch (e) { toast(e.message, 'err'); }
+      };
+    });
+  };
+  try { renderUsers((await get('/api/admin/users')).users || []); }
+  catch (e) { $('#userRows', el).innerHTML = `<div class="muted">${esc(e.message)}</div>`; }
+
+  $('#nuAdd', el).onclick = async () => {
+    const name = $('#nuName', el).value.trim();
+    const password = $('#nuPw', el).value;
+    const role = $('#nuRole', el).value;
+    if (!name) return toast('请输入用户名', 'err');
+    if (password.length < 6) return toast('密码至少 6 位', 'err');
+    try {
+      const data = await post('/api/admin/users', { name, password, role });
+      renderUsers(data.users || []);
+      $('#nuName', el).value = $('#nuPw', el).value = '';
+      toast('用户已添加', 'ok');
     } catch (e) { toast(e.message, 'err'); }
   };
 }

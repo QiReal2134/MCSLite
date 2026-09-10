@@ -1930,7 +1930,7 @@ function renderAppearancePage(el) {
         <button class="btn btn-sm" id="apReset">用默认渐变背景</button>
         <button class="btn btn-sm" id="apPickDefault">使用面板目录内的图片</button>
       </div>
-      <div class="hint" style="margin-top:10px">默认是纯 CSS 渐变(最快,零图片请求);上传图片建议 1920×1080 且尽量压缩,大图会明显拖慢首屏</div>
+      <div class="hint" style="margin-top:10px">默认是纯色加顶部一点渐变(最快,零图片请求);上传图片建议 1920×1080 且尽量压缩,大图会明显拖慢首屏</div>
     </div>
 
     <div class="ov-title">玩家端下载</div>

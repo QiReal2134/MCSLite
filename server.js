@@ -53,18 +53,25 @@ if (process.platform === 'win32') {
 
 // ---------- 面板配置 ----------
 const CFG_FILE = path.join(DATA_DIR, 'config.json');
+// 背景图留空 = 前端用 CSS 渐变(零图片请求)。旧的默认值是一张 3MB 的 web/bg.jpg,
+// 没被改过的安装直接迁移到渐变,避免每次开面板都白下几 MB
+const LEGACY_DEFAULT_BG = 'web/bg.jpg';
 function loadConfig() {
   let cfg = readJson(CFG_FILE, null);
   if (!cfg || typeof cfg !== 'object') {
     cfg = {
-      panel: { host: '0.0.0.0', port: 8333, background: 'web/bg.jpg' },
+      panel: { host: '0.0.0.0', port: 8333, background: '' },
       maxUploadMB: 4096,
       createdAt: now()
     };
     writeJson(CFG_FILE, cfg);
   }
-  if (!cfg.panel) cfg.panel = { host: '0.0.0.0', port: 8333, background: 'web/bg.jpg' };
-  if (!cfg.panel.background) cfg.panel.background = 'web/bg.jpg';
+  if (!cfg.panel) cfg.panel = { host: '0.0.0.0', port: 8333, background: '' };
+  let migratedBg = false;
+  if (cfg.panel.background === undefined) { cfg.panel.background = ''; migratedBg = true; }
+  if (cfg.panel.background === LEGACY_DEFAULT_BG) { cfg.panel.background = ''; migratedBg = true; }
+  // 立刻落盘,否则配置文件里会一直留着旧默认值,和界面显示的「渐变背景」不一致
+  if (migratedBg) writeJson(CFG_FILE, cfg);
   // 首页展示设置(A 标题 / B 图片 / C 标语),空值=自动
   if (cfg.panel.heroTitle === undefined) cfg.panel.heroTitle = '';
   if (cfg.panel.heroSlogan === undefined) cfg.panel.heroSlogan = '';
@@ -160,6 +167,8 @@ function publicStatus(req) {
     },
     // 玩家端能否下载存档/备份:未登录时前端据此决定是否显示下载入口
     publicDownload: !!(req.session || config.panel.publicDownload),
+    // 是否配置了背景图:未配置时前端用 CSS 渐变,不发 /bg 请求
+    hasBg: !!config.panel.background,
     glass: { color: config.panel.glassColor, opacity: config.panel.glassOpacity }
   };
 }
@@ -192,6 +201,8 @@ function sendImage(req, res, file, st) {
 
 // 后台图片(需在静态通配之前匹配)
 router.get('bg', (req, res) => {
+  // 未配置背景图(默认):前端走 CSS 渐变,正常不会请求到这里
+  if (!config.panel.background) { fail(res, 404, '未设置背景图片'); return; }
   const file = safeResolve(ROOT, config.panel.background);
   if (!file || !fs.existsSync(file)) { fail(res, 404, '背景图片不存在'); return; }
   sendImage(req, res, file, fs.statSync(file));
@@ -735,9 +746,12 @@ router.put('api/admin/settings', admin(async (req, res) => {
   const body = await readJsonBody(req, 64 * 1024);
   if ('background' in body) {
     const rel = String(body.background || '');
-    const abs = safeResolve(ROOT, rel);
-    if (abs && IMG_EXT.has(path.extname(abs).toLowerCase()) && fs.existsSync(abs)) {
-      config.panel.background = rel; saveConfig(config);
+    if (rel === '') { config.panel.background = ''; saveConfig(config); }   // 回到默认渐变
+    else {
+      const abs = safeResolve(ROOT, rel);
+      if (abs && IMG_EXT.has(path.extname(abs).toLowerCase()) && fs.existsSync(abs)) {
+        config.panel.background = rel; saveConfig(config);
+      }
     }
   }
   // 首页 A 标题 / C 标语

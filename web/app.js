@@ -134,6 +134,7 @@ const state = {
   overviewTimer: null,
   consoleAutoScroll: true,
   bgVer: Date.now(),
+  hasBg: false,   // 是否配置了背景图(否则用 CSS 渐变)
   hero: { title: '', slogan: '', hasImage: false },
   navPage: 'instances',
   ipList: [],
@@ -152,11 +153,37 @@ function showView(name) {
 }
 
 /* ═══════════════════ 背景 ═══════════════════ */
+// 未设置背景图时 url 为空:此时完全走 CSS 渐变,不发任何图片请求
 function setBg(url) {
-  document.documentElement.style.setProperty('--bg-img', `url('${url}')`);
+  const root = document.documentElement;
+  if (url) {
+    root.style.setProperty('--bg-img', `url('${url}')`);
+    root.classList.add('has-bg-img');
+  } else {
+    root.style.removeProperty('--bg-img');
+    root.classList.remove('has-bg-img');
+  }
 }
-function bgUrl() { return '/bg?v=' + state.bgVer; }
-function bumpBg() { state.bgVer = Date.now(); setBg(bgUrl()); }
+// 背景图固定用 /bg:服务端按 mtime 发 ETag 并带 no-cache,浏览器每次只做一次 304 校验。
+// 之前是 /bg?v=<时间戳>,每次开页面都是新地址,缓存完全命中不了,几 MB 的图每次重下
+function bgUrl() { return state.hasBg ? '/bg' : ''; }
+// 换过背景图后用带时间戳的地址刷一次,平时保持稳定地址以命中缓存
+function bumpBg() {
+  state.bgVer = Date.now();
+  setBg(state.hasBg ? ('/bg?v=' + state.bgVer) : '');
+}
+// 面板配置里带 background 时同步背景图状态(空 = 用默认渐变)
+function applyPanelBg(panel) {
+  if (panel && 'background' in panel) {
+    state.hasBg = !!panel.background;
+    setBg(bgUrl());
+  }
+}
+// 有背景图就渲染 <img>,没有就用渐变块(不能给 <img> 空的 src,那会把当前页面再请求一遍)
+function bgImgHtml(attrs = '') {
+  const u = bgUrl();
+  return u ? `<img src="${u}" ${attrs} loading="lazy" decoding="async" data-err="hide">` : '';
+}
 
 // 毛玻璃颜色:根据配置的纯色 + 透明度生成 CSS 变量(无渐变)
 function applyGlass(color, opacity) {
@@ -293,6 +320,8 @@ async function loadPlayer() {
     const data = await get('/api/status');
     $('#pvVer').textContent = 'v' + data.version;
     state.hero = data.hero || state.hero;
+    state.hasBg = !!data.hasBg;
+    setBg(bgUrl());
     if (data.glass) applyGlass(data.glass.color, data.glass.opacity);
     renderHero(data);
     renderPlayerGrid(data);
@@ -311,14 +340,14 @@ function renderHero(d) {
   const slogan = h.slogan || (first && first.ping && first.ping.motd
     ? first.ping.motd
     : (on ? '欢迎来到我们的 Minecraft 世界' : '暂无运行中的服务器'));
-  const imgSrc = h.hasImage ? ('/hero?v=' + state.bgVer) : bgUrl();
+  const imgSrc = h.hasImage ? '/hero' : bgUrl();   // 稳定地址 + ETag 协商,避免每次重下
   hero.innerHTML = `
     <div class="hero glass">
       <div class="hero-title">${esc(title)}</div>
       <div class="hero-sub">${esc(slogan)}</div>
     </div>
-    <div class="hero-img-panel">
-      <img src="${imgSrc}" alt="服务器图片" loading="lazy" decoding="async" data-err="hide">
+    <div class="hero-img-panel${imgSrc ? '' : ' no-img'}">
+      ${imgSrc ? `<img src="${imgSrc}" alt="服务器图片" loading="lazy" decoding="async" data-err="hide">` : ''}
     </div>`;
 }
 
@@ -427,8 +456,8 @@ function renderDetail(i, canDownload) {
         <div class="hero-title">${esc(i.name)}</div>
         <div class="hero-sub">${esc(p ? p.motd : (on ? '欢迎来到我们的世界' : '服务器未运行'))}</div>
       </div>
-      <div class="hero-img-panel">
-        <img src="${bgUrl()}" alt="" data-err="hide">
+      <div class="hero-img-panel${bgUrl() ? '' : ' no-img'}">
+        ${bgImgHtml('alt=""')}
       </div>
     </div>
     <div class="stat-cards">
@@ -534,6 +563,7 @@ async function enterAdmin() {
     state.panel = data.panel || {};
     state.ipList = (data.panel && data.panel.ipList) || [];
     applyGlass(state.panel.glassColor, state.panel.glassOpacity);
+    applyPanelBg(state.panel);
     renderSidebar();
     // 优先打开玩家页点击的实例
     const want = state.pendingInstanceId;
@@ -557,6 +587,7 @@ function startOverviewLoop() {
       state.java = data.java || [];
       state.lanIPs = data.lanIPs || [];
       state.panel = data.panel || {};
+      applyPanelBg(state.panel);
       renderSidebar();
       if (state.currentId) {
         const cur = state.instances.find(i => i.id === state.currentId);
@@ -1686,6 +1717,7 @@ async function refreshAll() {
   state.panel = data.panel || {};
   state.ipList = (data.panel && data.panel.ipList) || [];
   applyGlass(state.panel.glassColor, state.panel.glassOpacity);
+  applyPanelBg(state.panel);
   renderSidebar();
   if (state.instances.length > 0) {
     selectInstance(state.instances[0].id);
@@ -1859,7 +1891,7 @@ function renderSettingsPage() {
 /* ---------- 外观页 ---------- */
 function renderAppearancePage(el) {
   if (!el) return;
-  const bg = state.panel.background || 'web/bg.jpg';
+  const bg = state.panel.background || '';   // 空 = 用默认渐变背景
   const hero = state.panel.heroTitle !== undefined ? state.panel : { heroTitle: '', heroSlogan: '', heroImage: '' };
   el.innerHTML = `
     <div class="ov-title">首页展示设置 (A 标题 / B 图片 / C 标语)</div>
@@ -1869,7 +1901,9 @@ function renderAppearancePage(el) {
       <div class="ov-title" style="margin:6px 0 8px;font-size:13.5px">B · 首页图片(留空=跟随背景)</div>
       <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
         <div style="width:220px;border-radius:12px;overflow:hidden;border:1px solid var(--glass-border);flex-shrink:0">
-          <img id="hpPreview" src="${hero.heroImage ? '/hero?v=' + Date.now() : bgUrl()}" style="width:100%;aspect-ratio:16/10;object-fit:cover;display:block" loading="lazy" decoding="async" data-err="hide">
+          ${hero.heroImage
+            ? `<img id="hpPreview" src="/hero?v=${Date.now()}" style="width:100%;aspect-ratio:16/10;object-fit:cover;display:block" loading="lazy" decoding="async" data-err="hide">`
+            : `<div id="hpPreview" class="bg-preview no-img" style="aspect-ratio:16/10;border:0"></div>`}
         </div>
         <div style="flex:1;min-width:220px">
           <div style="display:flex;gap:10px;flex-wrap:wrap">
@@ -1888,15 +1922,17 @@ function renderAppearancePage(el) {
     <div class="ov-title">外观与背景</div>
     <div class="card">
       <div class="ov-title" style="margin-top:0">当前背景预览</div>
-      <div style="border-radius:12px;overflow:hidden;border:1px solid var(--glass-border);max-height:260px">
-        <img src="${bgUrl()}" style="width:100%;object-fit:cover;max-height:260px;display:block" loading="lazy" decoding="async" data-err="hide">
+      <div class="bg-preview">
+        ${bgUrl()
+          ? `<img src="${bgUrl()}" loading="lazy" decoding="async" data-err="hide">`
+          : '<div class="muted" style="display:flex;align-items:center;justify-content:center;height:200px;font-size:13px">默认渐变背景(零图片请求)</div>'}
       </div>
       <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">
         <button class="btn btn-primary btn-sm" id="apUpload">↑ 上传新背景</button>
-        <button class="btn btn-sm" id="apReset">恢复默认</button>
+        <button class="btn btn-sm" id="apReset">用默认渐变背景</button>
         <button class="btn btn-sm" id="apPickDefault">使用面板目录内的图片</button>
       </div>
-      <div class="hint" style="margin-top:10px">建议 1920×1080 以上</div>
+      <div class="hint" style="margin-top:10px">默认是纯 CSS 渐变(最快,零图片请求);上传图片建议 1920×1080 且尽量压缩,大图会明显拖慢首屏</div>
     </div>
 
     <div class="ov-title">玩家端下载</div>
@@ -1928,11 +1964,11 @@ function renderAppearancePage(el) {
   };
   $('#apReset', el).onclick = async () => {
     try {
-      await put('/api/admin/settings', { background: 'web/bg.jpg' });
-      state.panel.background = 'web/bg.jpg';
+      await put('/api/admin/settings', { background: '' });
+      state.panel.background = '';
       bumpBg();
       renderAppearancePage(el);
-      toast('已恢复默认背景', 'ok');
+      toast('已恢复默认渐变背景', 'ok');
     } catch (e) { toast(e.message, 'err'); }
   };
   $('#apPickDefault', el).onclick = () => {
@@ -2163,7 +2199,8 @@ async function renderAboutPage(el) {
 
 /* ---------- 初始化 ---------- */
 (async function init() {
-  setBg(bgUrl());
+  // 背景图等 /api 回来知道有没有配置再加载,避免默认配置下白下几 MB 图片
+  setBg('');
   applyGlass('#ffffff', 0.08);
   // 路由:地址栏 /admin 进入后台,否则显示玩家视图
   const wantAdmin = location.pathname.startsWith('/admin');

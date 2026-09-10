@@ -35,6 +35,14 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(BG_DIR, { recursive: true });
 fs.mkdirSync(TMP_DIR, { recursive: true });
 
+// 启动时清空临时目录:上次进程被强杀(如断电、SIGKILL)会留下半截上传/存档 zip,
+// 积少成多能占掉几 GB。此刻不可能有本进程正在进行的任务,整体删除是安全的
+try {
+  for (const f of fs.readdirSync(TMP_DIR)) {
+    fs.rmSync(path.join(TMP_DIR, f), { recursive: true, force: true });
+  }
+} catch {}
+
 // Windows 下把控制台切到 UTF-8,保证中文日志正常显示
 if (process.platform === 'win32') {
   try {
@@ -66,6 +74,8 @@ function loadConfig() {
   // 毛玻璃颜色配置(纯色,无渐变)
   if (cfg.panel.glassColor === undefined) cfg.panel.glassColor = '#ffffff';
   if (cfg.panel.glassOpacity === undefined) cfg.panel.glassOpacity = 0.08;
+  // 存档/备份下载是否对未登录的玩家端开放(默认关闭:世界存档含玩家数据,且打包会占用服务端资源)
+  if (cfg.panel.publicDownload === undefined) cfg.panel.publicDownload = false;
   return cfg;
 }
 function saveConfig(cfg) { writeJson(CFG_FILE, cfg); }
@@ -115,7 +125,7 @@ function getLanIPs() {
 }
 
 // 玩家视图 /api/status 的公开数据(不含敏感信息)
-function publicStatus() {
+function publicStatus(req) {
   const memTotal = os.totalmem();
   const memFree = os.freemem();
   return {
@@ -148,6 +158,8 @@ function publicStatus() {
       slogan: String(config.panel.heroSlogan || ''),
       hasImage: !!(config.panel.heroImage && safeResolve(ROOT, config.panel.heroImage) && fs.existsSync(path.resolve(ROOT, config.panel.heroImage)))
     },
+    // 玩家端能否下载存档/备份:未登录时前端据此决定是否显示下载入口
+    publicDownload: !!(req.session || config.panel.publicDownload),
     glass: { color: config.panel.glassColor, opacity: config.panel.glassOpacity }
   };
 }
@@ -195,7 +207,7 @@ router.get('hero', (req, res) => {
 });
 
 // 玩家视图(公开,只读)
-router.get('api/status', (req, res) => json(res, 200, publicStatus()));
+router.get('api/status', (req, res) => json(res, 200, publicStatus(req)));
 router.get('api/status/:id', (req, res) => {
   const oi = im.overview(true).find(i => i.id === req.params.id);
   if (!oi) return fail(res, 404, '实例不存在');
@@ -203,6 +215,7 @@ router.get('api/status/:id', (req, res) => {
     ok: true,
     version: VERSION,
     time: now(),
+    publicDownload: !!(req.session || config.panel.publicDownload),
     instance: {
       id: oi.id, name: oi.name, status: oi.status,
       ip: oi.ip, port: oi.port,
@@ -217,8 +230,10 @@ router.get('api/status/:id', (req, res) => {
 router.get('api/version', (req, res) => ok(res, { version: VERSION, name: 'MCSLite' }));
 
 // ---------- 玩家下载(备份/实时存档,仅地图;每 IP 限速) ----------
-const dlLimits = new Map();     // ip -> lastAt,下载 120 秒 1 次
-const dlListLimits = new Map(); // ip -> lastAt,列表 10 秒 1 次
+// 存档与备份各自一个桶:刚下过存档不该让备份下载被 429 顶掉
+const dlSaveLimits = new Map();   // ip -> lastAt,实时存档 120 秒 1 次
+const dlBackupLimits = new Map(); // ip -> lastAt,备份下载 120 秒 1 次
+const dlListLimits = new Map();   // ip -> lastAt,列表 10 秒 1 次
 function checkLimit(map, ip, windowMs) {
   const key = String(ip || '?');
   const last = map.get(key) || 0;
@@ -229,12 +244,22 @@ function checkLimit(map, ip, windowMs) {
   map.set(key, now());
   return { blocked: false };
 }
-function checkDlLimit(ip) { return checkLimit(dlLimits, ip, 120000); }
+function checkDlLimit(map, ip) { return checkLimit(map, ip, 120000); }
 function checkListLimit(ip) { return checkLimit(dlListLimits, ip, 10000); }
+
+// 存档/备份下载默认只对登录用户开放:世界存档与备份含玩家数据,
+// 且每次打包都要让在线服务端 save-off/save-all flush 并全量压缩。
+// 管理员可在「系统设置」里放开给玩家端(cfg.panel.publicDownload)
+function requireDownload(req, res) {
+  if (req.session || config.panel.publicDownload) return true;
+  fail(res, 401, '存档下载未开放,请先登录');
+  return false;
+}
 
 router.get('api/status/:id/backups', (req, res) => {
   const ins = im.get(req.params.id);
   if (!ins) return fail(res, 404, '实例不存在');
+  if (!requireDownload(req, res)) return;
   const lim = checkListLimit(req.socket.remoteAddress);
   if (lim.blocked) return fail(res, 429, `请求过于频繁,请 ${lim.retryIn} 秒后再试`);
   ok(res, { backups: B.listBackups(im.instanceDir(ins)).map(b => ({ name: b.name, size: b.size, mtime: b.mtime })) });
@@ -243,12 +268,13 @@ router.get('api/status/:id/backups', (req, res) => {
 router.get('api/status/:id/backup/:name', (req, res) => {
   const ins = im.get(req.params.id);
   if (!ins) return fail(res, 404, '实例不存在');
+  if (!requireDownload(req, res)) return;
   let file = null;
   try { file = safeJoin(B.backupsDir(im.instanceDir(ins)), req.params.name); }
   catch { return fail(res, 404, '备份不存在'); }
   // 先校验文件存在,再扣限流配额(404 不占次数)
   if (!file.toLowerCase().endsWith('.zip') || !fs.existsSync(file)) return fail(res, 404, '备份不存在');
-  const lim = checkDlLimit(req.socket.remoteAddress);
+  const lim = checkDlLimit(dlBackupLimits, req.socket.remoteAddress);
   if (lim.blocked) return fail(res, 429, `下载过于频繁,请 ${lim.retryIn} 秒后再试`);
   const st = fs.statSync(file);
   res.writeHead(200, {
@@ -263,11 +289,12 @@ router.get('api/status/:id/backup/:name', (req, res) => {
 router.get('api/status/:id/save', async (req, res) => {
   const ins = im.get(req.params.id);
   if (!ins) return fail(res, 404, '实例不存在');
+  if (!requireDownload(req, res)) return;
   const dir = im.instanceDir(ins);
   const worlds = B.worldFolders(dir, im.readProps(ins).props['level-name']);
   if (worlds.length === 0) return fail(res, 404, '未找到世界文件夹');
   // 校验通过后再扣限流配额
-  const lim = checkDlLimit(req.socket.remoteAddress);
+  const lim = checkDlLimit(dlSaveLimits, req.socket.remoteAddress);
   if (lim.blocked) return fail(res, 429, `下载过于频繁,请 ${lim.retryIn} 秒后再试`);
   const tmpFile = path.join(TMP_DIR, 'save-' + uid(10) + '.zip');
   try {
@@ -283,7 +310,7 @@ router.get('api/status/:id/save', async (req, res) => {
     res.on('close', () => { try { fs.unlinkSync(tmpFile); } catch {} });
   } catch (e) {
     try { fs.rmSync(tmpFile, { force: true }); } catch {}
-    fail(res, 500, '打包失败: ' + (e.message || e));
+    fail(res, (e && e.status) || 500, '打包失败: ' + (e.message || e));
   }
 });
 
@@ -299,12 +326,16 @@ router.post('api/login', async (req, res) => {
   const rate = auth.checkRate(key);
   if (rate.blocked) return fail(res, 429, `尝试次数过多,请 ${rate.retryIn} 秒后再试`);
   const user = auth.findUser(name);
-  if (!user || !auth.verify(pw, user)) {
+  if (!user) {
+    auth.burnScrypt(pw);   // 补齐时间差,避免用响应快慢枚举用户名
+    return fail(res, 401, '用户名或密码错误');
+  }
+  if (!auth.verify(pw, user)) {
     return fail(res, 401, '用户名或密码错误');
   }
   auth.resetRate(key);
   const token = auth.createSession(user);
-  auth.setCookie(res, token);
+  auth.setCookie(res, token, req);
   json(res, 200, { ok: true, name: user.name, role: user.role, mustChange: !!user.must_change });
 });
 
@@ -312,7 +343,7 @@ router.post('api/logout', (req, res) => {
   const cookie = req.headers.cookie || '';
   const m = /(?:^|;\s*)token=([^;]+)/.exec(cookie);
   if (m) { try { auth.destroy(decodeURIComponent(m[1])); } catch {} }
-  auth.clearCookie(res);
+  auth.clearCookie(res, req);
   ok(res, {});
 });
 
@@ -345,7 +376,8 @@ router.get('api/admin/overview', admin(async (req, res) => {
     panel: {
       host: config.panel.host, port: config.panel.port, background: config.panel.background,
       heroTitle: config.panel.heroTitle, heroSlogan: config.panel.heroSlogan, heroImage: config.panel.heroImage,
-      ipList: config.panel.ipList, glassColor: config.panel.glassColor, glassOpacity: config.panel.glassOpacity
+      ipList: config.panel.ipList, glassColor: config.panel.glassColor, glassOpacity: config.panel.glassOpacity,
+      publicDownload: !!config.panel.publicDownload
     }
   });
 }));
@@ -598,6 +630,13 @@ router.post('api/admin/instances/:id/upload', admin((req, res) => {
     .catch(e => fail(res, (e && e.status) || 400, e.message));
 }));
 
+// 图片按真实 MIME 返回:文件管理器预览用 <img> 直接引用本接口,
+// 一律返回 octet-stream 的话配上下发的 nosniff 浏览器就不渲染了
+const PREVIEW_MIME = {
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.svg': 'image/svg+xml'
+};
+
 router.get('api/admin/instances/:id/download', admin((req, res) => {
   const root = fileRoot(req);
   if (!root) return fail(res, 404, '实例不存在');
@@ -606,8 +645,10 @@ router.get('api/admin/instances/:id/download', admin((req, res) => {
     if (!fs.existsSync(file)) return fail(res, 404, '文件不存在');
     const st = fs.statSync(file);
     if (st.isDirectory()) return fail(res, 400, '不能下载目录');
+    const ext = path.extname(file).toLowerCase();
     res.writeHead(200, {
-      'Content-Type': 'application/octet-stream',
+      // Content-Disposition 保持 attachment:直接打开 svg 之类的文件不会被当页面执行
+      'Content-Type': PREVIEW_MIME[ext] || 'application/octet-stream',
       'Content-Length': st.size,
       'Content-Disposition': 'attachment; filename*=UTF-8\'\'' + encodeURIComponent(path.basename(file))
     });
@@ -656,7 +697,8 @@ router.get('api/admin/settings', admin((req, res) => {
     panel: {
       host: config.panel.host, port: config.panel.port, background: config.panel.background,
       heroTitle: config.panel.heroTitle, heroSlogan: config.panel.heroSlogan, heroImage: config.panel.heroImage,
-      ipList: config.panel.ipList, glassColor: config.panel.glassColor, glassOpacity: config.panel.glassOpacity
+      ipList: config.panel.ipList, glassColor: config.panel.glassColor, glassOpacity: config.panel.glassOpacity,
+      publicDownload: !!config.panel.publicDownload
     },
     maxUploadMB: config.maxUploadMB,
     users: req.session.role === 'admin' ? auth.list() : undefined
@@ -722,6 +764,8 @@ router.put('api/admin/settings', admin(async (req, res) => {
     if (isNaN(o) || o < 0.02 || o > 0.6) return fail(res, 400, '透明度应在 0.02 ~ 0.6 之间');
     config.panel.glassOpacity = o; saveConfig(config);
   }
+  // 是否允许未登录的玩家端下载存档/备份
+  if ('publicDownload' in body) { config.panel.publicDownload = !!body.publicDownload; saveConfig(config); }
   ok(res, { panel: config.panel });
 }));
 
@@ -784,6 +828,7 @@ router.delete('api/admin/users/:name', admin.admin(async (req, res) => {
   if (name === req.session.name) return fail(res, 400, '不能删除当前登录用户');
   if (user.role === 'admin' && auth.list().filter(u => u.role === 'admin').length === 1) return fail(res, 400, '至少保留一个管理员');
   auth.deleteUser(name);
+  auth.destroySessionsOf(name);   // 被删用户的会话立即失效,不等 7 天过期
   ok(res, { users: auth.list() });
 }));
 
@@ -860,6 +905,7 @@ function pipeToFile(req, file, maxSize) {
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
   res.setHeader('X-Powered-By', 'MCSLite');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'");
   router.handle(req, res);
 });

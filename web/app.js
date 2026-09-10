@@ -346,9 +346,9 @@ function renderHero(d) {
       <div class="hero-title">${esc(title)}</div>
       <div class="hero-sub">${esc(slogan)}</div>
     </div>
-    <div class="hero-img-panel${imgSrc ? '' : ' no-img'}">
-      ${imgSrc ? `<img src="${imgSrc}" alt="服务器图片" loading="lazy" decoding="async" data-err="hide">` : ''}
-    </div>`;
+    ${imgSrc ? `<div class="hero-img-panel">
+      <img src="${imgSrc}" alt="服务器图片" loading="lazy" decoding="async" data-err="hide">
+    </div>` : ''}`;
 }
 
 function renderPlayerGrid(d) {
@@ -456,9 +456,7 @@ function renderDetail(i, canDownload) {
         <div class="hero-title">${esc(i.name)}</div>
         <div class="hero-sub">${esc(p ? p.motd : (on ? '欢迎来到我们的世界' : '服务器未运行'))}</div>
       </div>
-      <div class="hero-img-panel${bgUrl() ? '' : ' no-img'}">
-        ${bgImgHtml('alt=""')}
-      </div>
+      ${bgUrl() ? `<div class="hero-img-panel">${bgImgHtml('alt=""')}</div>` : ''}
     </div>
     <div class="stat-cards">
       <div class="card stat-mini"><div class="v" style="color:${(on && i.tps != null && i.tps < 18) ? 'var(--warn)' : ''}">${tps}</div><div class="l">TPS</div></div>

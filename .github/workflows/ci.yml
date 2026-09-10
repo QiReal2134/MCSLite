@@ -29,7 +29,8 @@ jobs:
           mkdir -p /tmp/smoke/data /tmp/smoke/servers
           cp -r server.js lib web /tmp/smoke/
           cd /tmp/smoke
-          node server.js --port 8399 --host 127.0.0.1 &
+          nohup node server.js --port 8399 --host 127.0.0.1 > panel.log 2>&1 < /dev/null &
+          fail() { echo "FAIL: $1"; echo "--- panel.log ---"; tail -40 panel.log; exit 1; }
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:8399/api/status > /dev/null && break
             sleep 1
@@ -44,30 +45,99 @@ jobs:
           # 路径穿越必须被拒绝
           code=$(curl -s -o /dev/null -w '%{http_code}' --path-as-is \
             "http://127.0.0.1:8399/..%2fdata%2fconfig.json")
-          test "$code" = "403" || { echo "穿越测试失败: $code"; exit 1; }
+          test "$code" = "403" || fail "穿越测试失败: $code"
 
           # 畸形编码必须返回 4xx,不能打挂请求
           code=$(curl -s -o /dev/null -w '%{http_code}' \
             "http://127.0.0.1:8399/api/status/%zz")
-          test "$code" = "400" || { echo "畸形编码测试失败: $code"; exit 1; }
+          test "$code" = "400" || fail "畸形编码测试失败: $code"
 
           # 畸形 cookie 不能挂死请求(回归:decodeURIComponent 抛 URIError 导致连接悬挂)
           code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Cookie: token=%' \
             http://127.0.0.1:8399/api/status)
-          test "$code" = "200" || { echo "畸形 cookie 测试失败: $code"; exit 1; }
+          test "$code" = "200" || fail "畸形 cookie 测试失败: $code"
 
           # HEAD 请求按 GET 处理,健康检查不 404
           code=$(curl -s -I -o /dev/null -w '%{http_code}' http://127.0.0.1:8399/)
-          test "$code" = "200" || { echo "HEAD 测试失败: $code"; exit 1; }
+          test "$code" = "200" || fail "HEAD 测试失败: $code"
 
           # 未登录访问管理接口必须 401
           code=$(curl -s -o /dev/null -w '%{http_code}' \
             http://127.0.0.1:8399/api/admin/overview)
-          test "$code" = "401" || { echo "鉴权测试失败: $code"; exit 1; }
+          test "$code" = "401" || fail "鉴权测试失败: $code"
 
           # 默认账号可登录
-          curl -sf -X POST -H 'Content-Type: application/json' \
+          curl -sf -c cj -X POST -H 'Content-Type: application/json' \
             -d '{"username":"admin","password":"admin123"}' \
             http://127.0.0.1:8399/api/login > /dev/null
 
           echo "冒烟测试通过"
+
+      # 实例生命周期:启动必须返回 pid、退出回调不能抛异常。
+      # 这两条分别覆盖 startInner/exit 里裸 id 的回归(启动永远 400、每次停止泄漏日志句柄)
+      - name: 实例生命周期测试
+        run: |
+          cd /tmp/smoke
+          command -v zip > /dev/null || sudo apt-get install -y zip
+          fail() { echo "FAIL: $1"; echo "--- panel.log ---"; tail -40 panel.log; exit 1; }
+
+          id=$(curl -sf -b cj -X POST -H 'Content-Type: application/json' \
+            -d '{"name":"ci"}' http://127.0.0.1:8399/api/admin/instances \
+            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(JSON.parse(s).instance.id))")
+          test -n "$id" || fail "实例创建失败"
+
+          # 桩 java(忽略参数,打印一行后退出)+ 假 jar + 世界目录
+          printf '#!/bin/sh\necho "MCSLite CI fake server"\nsleep 2\nexit 0\n' > servers/ci/fake-java.sh
+          chmod +x servers/ci/fake-java.sh
+          : > servers/ci/server.jar
+          mkdir -p servers/ci/world && echo ci > servers/ci/world/level.dat
+
+          # 默认不向未登录用户开放存档下载
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8399/api/status/$id/save")
+          test "$code" = "401" || fail "匿名存档下载应默认 401,实际 $code"
+
+          curl -sf -b cj -X PUT -H 'Content-Type: application/json' \
+            -d "{\"javaPath\":\"$(pwd)/servers/ci/fake-java.sh\",\"serverJar\":\"server.jar\"}" \
+            "http://127.0.0.1:8399/api/admin/instances/$id/config" > /dev/null
+
+          # 启动:必须 200 且返回 pid
+          resp=$(curl -s -b cj -X POST "http://127.0.0.1:8399/api/admin/instances/$id/start")
+          echo "start -> $resp"
+          case "$resp" in
+            *'"ok":true'*) ;;
+            *) fail "启动接口未返回成功: $resp" ;;
+          esac
+          case "$resp" in
+            *'"pid"'*) ;;
+            *) fail "启动返回缺少 pid: $resp" ;;
+          esac
+
+          # 等桩进程退出并确认面板记录了停止
+          sleep 4
+          curl -s -b cj "http://127.0.0.1:8399/api/admin/instances/$id/log" | grep -q '服务端已停止' \
+            || fail "未记录服务端停止"
+
+          grep -q '未捕获异常' panel.log && fail "面板出现未捕获异常(退出回调抛错)"
+
+          # 管理员显式开放后匿名可下载
+          curl -sf -b cj -X PUT -H 'Content-Type: application/json' \
+            -d '{"publicDownload":true}' http://127.0.0.1:8399/api/admin/settings > /dev/null
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8399/api/status/$id/save")
+          test "$code" = "200" || fail "开放后应允许匿名下载,实际 $code"
+
+          # level-name=.. 不得把整个 servers/ 打包出去(回归:越界读取其他实例)
+          mkdir -p servers/other/world && echo other > servers/other/world/level.dat
+          printf 'level-name=..\n' > servers/ci/server.properties
+          curl -s -o /tmp/esc.zip "http://127.0.0.1:8399/api/status/$id/save" || true
+          if unzip -l /tmp/esc.zip 2>/dev/null | grep -q 'other'; then
+            unzip -l /tmp/esc.zip
+            fail "越界打包:存档 zip 中出现了其他实例的内容"
+          fi
+
+          # 空路径不能删掉实例根目录(回归:remove('') 递归删除整个实例)
+          code=$(curl -s -o /dev/null -w '%{http_code}' -b cj -X POST -H 'Content-Type: application/json' \
+            -d '{"path":""}' "http://127.0.0.1:8399/api/admin/instances/$id/delete")
+          test "$code" = "400" || fail "空路径删除应被拒绝,实际 $code"
+          test -d "servers/ci/world" || fail "实例目录被空路径删除操作破坏"
+
+          echo "实例生命周期测试通过"
